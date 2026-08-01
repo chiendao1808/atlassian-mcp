@@ -1,0 +1,78 @@
+# Execution Plan: Build PowerShell Installer
+
+Date: 2026-08-01
+
+## Status
+
+Active
+
+## Outcome
+
+Complete the PowerShell remote installer counterpart at `scripts/install-from-remote.ps1` with tests at `tests/install-from-remote.Tests.ps1`, matching the installer semantics defined in `docs/specs/SPECS.md`.
+
+## Context
+
+- `AGENTS.md`
+- `docs/WORKFLOW.md`
+- `.codex/AGENTS.md`
+- `.codex/agents/implementer.toml`
+- `.codex/agents/code_reviewer.toml`
+- `docs/specs/SPECS.md` sections 11.2, 11.3, 11.4, 17.2, and Task 22
+- Existing Bash installer at `scripts/install-from-remote.sh`
+- Existing Bash installer tests at `tests/install-from-remote_test.sh`
+
+## Scope
+
+In scope:
+
+- Create `scripts/install-from-remote.ps1`.
+- Create `tests/install-from-remote.Tests.ps1`.
+- Update README PowerShell bootstrap documentation if needed.
+- Mirror Bash installer validation semantics: provider-neutral source, module selection, non-secret config, token env indirection, dry-run, backup/rollback, idempotency, and stable final names.
+
+Out of scope:
+
+- PowerShell package signing.
+- Real Claude Code, Codex, Jira, or Bitbucket smoke tests.
+- Release packaging and checksums.
+- Reworking the completed Bash installer except for documentation consistency.
+
+## Approach
+
+Reuse the Bash installer behavior as the executable reference and implement the smallest PowerShell script that supports Windows PowerShell 5.1. Keep tests self-contained with mocked `git` and `go` commands and direct PowerShell assertions.
+
+## Risks And Recovery
+
+- Risk: current checkout already has Task 15-21 uncommitted changes. Mitigation: do not revert or rewrite them; touch only PowerShell installer, tests, README/docs, and this plan.
+- Risk: Windows ACL and parser behavior can vary. Mitigation: test command invocation and generated file content locally; disclose missing real-client smoke tests.
+- Recovery: remove `scripts/install-from-remote.ps1`, `tests/install-from-remote.Tests.ps1`, related README edits, and this plan if rejected.
+
+## Progress
+
+- [x] Confirmed spec and runtime availability.
+- [x] Created active plan.
+- [x] Implement PowerShell installer and tests with RED/GREEN evidence.
+- [x] Run focused PowerShell validation.
+- [ ] Run repository validation.
+- [x] Run code review gate narrowed to `scripts/install-from-remote.ps1`.
+- [ ] Move this plan to `docs/plans/completed/`.
+
+## Decisions
+
+- 2026-08-01: Treat this as the PowerShell counterpart to Task 21; in current `SPECS.md` it is Task 22.
+- 2026-08-01: Use Windows PowerShell 5.1 for local validation because `pwsh` is not available.
+- 2026-08-01: Use direct PowerShell test execution; Pester 3.4 is present but newer Pester semantics are not assumed.
+- 2026-08-01: Agent config log: `implementer` uses `.codex/agents/implementer.toml`, model `gpt-5.5`, reasoning `high`, access `workspace-write`, approval `on-request`.
+- 2026-08-01: Agent config log: `code_reviewer` uses `.codex/agents/code_reviewer.toml`, model `gpt-5.6-terra`, reasoning `high`, access `read-only`, approval `never`.
+- 2026-08-01: Review requirement was narrowed to the new PowerShell installer file only.
+
+## Validation
+
+- RED proof: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` failed because `scripts/install-from-remote.ps1` did not exist.
+- Focused proof: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed.
+- Syntax proof: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Repository proof: `go test ./...` with local caches was started and then interrupted by the user; no pass is claimed.
+
+## Result
+
+PowerShell installer and focused tests are implemented. Remaining concerns: repository-wide Go validation was interrupted, and no real Claude Code, Codex, Jira, or Bitbucket smoke test was run.

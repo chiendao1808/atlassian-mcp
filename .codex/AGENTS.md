@@ -68,6 +68,8 @@ Reviews the current Git changes and returns actionable findings without modifyin
 Typical responsibilities:
 
 - Review staged, unstaged, and relevant untracked changes.
+- Prioritize changed source code, tests, configuration, schemas, migrations, build/deployment files, and other runtime-affecting artifacts.
+- Consult implementation plans, handoff documents, memory files, and agent notes only as scoped supporting context unless full document review is explicitly requested.
 - Perform the review directly and must not spawn or delegate to any subagent.
 - Check changes against project rules, review checklists, coding conventions, applicable review skills, and detected technology patterns.
 - Identify correctness, compatibility, security, performance, concurrency, data, integration, side-effect, and documentation/comment coverage risks.

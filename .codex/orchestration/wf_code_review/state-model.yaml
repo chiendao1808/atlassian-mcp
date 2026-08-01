@@ -22,6 +22,9 @@ runtime_state_template:
     review_scope: null
   review:
     reviewed_files: []
+    primary_review_files: []
+    context_files_consulted: []
+    excluded_context_files: []
     findings: []
     accepted_findings: []
     deferred_findings: []
@@ -103,11 +106,14 @@ states:
       - notes
   DIFF_REVIEW:
     agent: code_reviewer
-    purpose: Review the selected change set and return evidence-based, actionable findings and a review summary.
+    purpose: Prioritize changed code and runtime-affecting artifacts, use plan or memory files only as scoped context, and return evidence-based actionable findings.
     expected_outputs:
     - review_report
     - review_findings
     - review_summary
+    - primary_review_files
+    - context_files_consulted
+    - excluded_context_files
     - documentation_comment_findings
     allowed_events:
     - review_accepted
@@ -242,11 +248,14 @@ states:
       - notes
   RE_REVIEW:
     agent: code_reviewer
-    purpose: Confirm accepted findings are resolved and detect regressions introduced by remediation.
+    purpose: Re-review remediated code and runtime-affecting artifacts first, consulting plan or memory files only when directly relevant to accepted findings.
     expected_outputs:
     - re_review_report
     - resolved_findings
     - remaining_findings
+    - primary_review_files
+    - context_files_consulted
+    - excluded_context_files
     - documentation_comment_findings
     allowed_events:
     - review_accepted

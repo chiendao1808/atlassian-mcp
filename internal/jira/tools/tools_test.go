@@ -95,6 +95,86 @@ func TestAuthenticateActivatesOnlyAfterServerInfoAndMyself(t *testing.T) {
 	}
 }
 
+func TestAuthenticateResultOmitsSensitiveUpstreamData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/2/serverInfo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"version":       "6.4.14",
+				"password":      "server-secret",
+				"authorization": "Basic server-secret",
+			})
+		case "/rest/api/2/myself":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":       "alice",
+				"authHeader": "Basic user-secret",
+				"password":   "user-secret",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	out := newTestService(server.URL, server.Client()).Authenticate(context.Background(), AuthenticateInput{Username: "alice", Password: "client-secret"})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ToLower(string(raw))
+	for _, secret := range []string{"client-secret", "server-secret", "user-secret", "basic "} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("auth result leaked %q: %s", secret, text)
+		}
+	}
+}
+
+func TestGetIssueReturnsIssueUnderDataIssue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/issue/PROJ-1" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "10001", "key": "PROJ-1"})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.GetIssue(context.Background(), GetIssueInput{IssueIDOrKey: "PROJ-1"})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	data, ok := out.Data.(map[string]any)
+	if !ok || data["issue"] == nil {
+		t.Fatalf("data should contain issue: %#v", out.Data)
+	}
+}
+
+func TestAddIssueCommentRejectsBlankVisibilityValueWithoutNetwork(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.AddIssueComment(context.Background(), AddCommentInput{
+		IssueIDOrKey: "PROJ-1",
+		Body:         "looks good",
+		Visibility:   &Visibility{Type: "role", Value: " "},
+	})
+	if out.Success || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+		t.Fatalf("out=%+v", out)
+	}
+	if calls != 0 {
+		t.Fatalf("invalid visibility sent %d requests", calls)
+	}
+}
+
 func TestUpdateIssueReturnsPartialSuccessWhenRefreshFails(t *testing.T) {
 	var puts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +206,28 @@ func TestUpdateIssueReturnsPartialSuccessWhenRefreshFails(t *testing.T) {
 	}
 }
 
+func TestTransitionRejectsRefreshOptionsWhenReturnIssueFalseWithoutNetwork(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.TransitionIssue(context.Background(), TransitionIssueInput{
+		IssueIDOrKey: "PROJ-1",
+		TransitionID: "31",
+		ReturnFields: []string{"summary"},
+	})
+	if out.Success || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+		t.Fatalf("out=%+v", out)
+	}
+	if calls != 0 {
+		t.Fatalf("invalid refresh options sent %d requests", calls)
+	}
+}
+
 func TestTransitionByNameRejectsAmbiguousMatches(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -144,6 +246,34 @@ func TestTransitionByNameRejectsAmbiguousMatches(t *testing.T) {
 	out := svc.TransitionIssue(context.Background(), TransitionIssueInput{IssueIDOrKey: "PROJ-1", TransitionName: "Done"})
 	if out.Success || out.Error == nil || out.Error.Code != "JIRA_TRANSITION_AMBIGUOUS" {
 		t.Fatalf("out=%+v", out)
+	}
+}
+
+func TestTransitionByNamePreservesWhitespaceForExactMatch(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"transitions": []map[string]any{
+				{"id": "31", "name": "Done"},
+			}})
+		case http.MethodPost:
+			posts++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.TransitionIssue(context.Background(), TransitionIssueInput{IssueIDOrKey: "PROJ-1", TransitionName: " Done "})
+	if out.Success || out.Error == nil || out.Error.Code != "JIRA_TRANSITION_NOT_FOUND" {
+		t.Fatalf("out=%+v", out)
+	}
+	if posts != 0 {
+		t.Fatalf("whitespace-padded transition name posted %d transition requests", posts)
 	}
 }
 

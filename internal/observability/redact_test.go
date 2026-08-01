@@ -22,3 +22,26 @@ func TestRedactSecretsRecursively(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatSanitizedRedactsTypedToolInput(t *testing.T) {
+	input := struct {
+		Tool  string `json:"tool"`
+		Input struct {
+			Username      string `json:"username"`
+			Password      string `json:"password"`
+			Authorization string `json:"authorization"`
+		} `json:"input"`
+	}{
+		Tool: "jira_authenticate",
+	}
+	input.Input.Username = "alice"
+	input.Input.Password = "sentinel-password"
+	input.Input.Authorization = "Basic sentinel-auth"
+
+	text := strings.ToLower(FormatSanitized(input))
+	for _, secret := range []string{"sentinel-password", "sentinel-auth", "basic "} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("sanitized typed input still contains %q: %s", secret, text)
+		}
+	}
+}

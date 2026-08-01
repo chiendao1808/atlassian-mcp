@@ -220,7 +220,7 @@ For each state, provide the assigned agent with a self-contained task containing
 
 Use canonical agent types from `AGENTS.md` and `.codex/agents/*.toml`.
 
-Dispatch `code_reviewer` once per review state and require it to perform the review directly in its existing thread. Do not ask or permit `code_reviewer` to spawn, mirror, or delegate to another reviewer or subagent; uncertain evidence must be returned to the orchestrator for an explicit `explorer` dispatch when the workflow provides that state.
+Dispatch `code_reviewer` once per review state and require it to perform the review directly in its existing thread. Do not ask or permit `code_reviewer` to spawn, mirror, or delegate to another reviewer or subagent; uncertain evidence must be returned to the orchestrator for an explicit `explorer` dispatch when the workflow provides that state. In every review dispatch, instruct it to prioritize changed source code and runtime-affecting artifacts. Treat plans, handoffs, memory-bank files, and agent notes as secondary context to consult selectively unless the user explicitly requests full document review.
 
 Do not send the full conversation when a compact state snapshot is sufficient. Preserve agent outputs in `metadata.raw_context.agent_outputs` or as referenced artifacts before compacting them into normalized workflow fields.
 

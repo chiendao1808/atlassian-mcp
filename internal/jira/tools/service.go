@@ -8,42 +8,51 @@ import (
 
 	"github.com/chiendao1808/atlassian-mcp/internal/jira/auth"
 	"github.com/chiendao1808/atlassian-mcp/internal/jira/client"
+	"github.com/chiendao1808/atlassian-mcp/internal/observability"
 	"github.com/chiendao1808/atlassian-mcp/internal/result"
 )
 
+// Service owns the Jira tool handlers and the process-local authenticated session.
 type Service struct {
 	client *client.Client
 	store  *auth.SessionStore
 }
 
+// NewService binds Jira REST access and session storage for MCP tool execution.
 func NewService(client *client.Client, store *auth.SessionStore) *Service {
 	return &Service{client: client, store: store}
 }
 
+// Store exposes the session store for module wiring and focused tests.
 func (s *Service) Store() *auth.SessionStore { return s.store }
 
+// AuthenticateInput carries the only Jira credential payload accepted by the toolset.
 type AuthenticateInput struct {
 	Username string `json:"username" jsonschema:"Jira username"`
 	Password string `json:"password" jsonschema:"Sensitive Jira password"`
 }
 
+// GetIssueInput selects one Jira issue and optional native Jira query expansions.
 type GetIssueInput struct {
 	IssueIDOrKey string   `json:"issueIdOrKey" jsonschema:"Jira issue ID or key"`
 	Fields       []string `json:"fields,omitempty" jsonschema:"Optional Jira fields query values"`
 	Expand       []string `json:"expand,omitempty" jsonschema:"Optional Jira expand query values"`
 }
 
+// Visibility is Jira's native role/group comment visibility shape.
 type Visibility struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
 }
 
+// AddCommentInput posts one Jira comment without automatic replay on transport failure.
 type AddCommentInput struct {
 	IssueIDOrKey string      `json:"issueIdOrKey"`
 	Body         string      `json:"body"`
 	Visibility   *Visibility `json:"visibility,omitempty"`
 }
 
+// UpdateIssueInput passes Jira fields/update JSON through unchanged and can refresh the issue after mutation.
 type UpdateIssueInput struct {
 	IssueIDOrKey string         `json:"issueIdOrKey"`
 	Fields       map[string]any `json:"fields,omitempty"`
@@ -53,6 +62,7 @@ type UpdateIssueInput struct {
 	ReturnExpand []string       `json:"returnExpand,omitempty"`
 }
 
+// TransitionIssueInput selects one Jira transition and optionally carries native transition-screen updates.
 type TransitionIssueInput struct {
 	IssueIDOrKey   string         `json:"issueIdOrKey"`
 	TransitionID   string         `json:"transitionId,omitempty"`
@@ -64,6 +74,7 @@ type TransitionIssueInput struct {
 	ReturnExpand   []string       `json:"returnExpand,omitempty"`
 }
 
+// Authenticate verifies candidate credentials with Jira before replacing the active process session.
 func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) result.Envelope {
 	username := strings.TrimSpace(input.Username)
 	if username == "" || input.Password == "" {
@@ -79,9 +90,13 @@ func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) res
 		return jiraClientError("jira_authenticate", "JIRA_AUTHENTICATION_FAILED", err)
 	}
 	s.store.Replace(candidate)
-	return result.OK("jira", "jira_authenticate", map[string]any{"server": serverInfo, "user": myself})
+	return result.OK("jira", "jira_authenticate", map[string]any{
+		"server": observability.Redact(serverInfo),
+		"user":   observability.Redact(myself),
+	})
 }
 
+// GetIssue returns Jira's original issue JSON under data.issue after session and path validation.
 func (s *Service) GetIssue(ctx context.Context, input GetIssueInput) result.Envelope {
 	cred, err := s.requireCredential("jira_get_issue")
 	if err != nil {
@@ -96,9 +111,10 @@ func (s *Service) GetIssue(ctx context.Context, input GetIssueInput) result.Enve
 	if err := s.client.GetJSON(ctx, cred, "/issue/"+issueID, query, &issue); err != nil {
 		return jiraClientError("jira_get_issue", "", err)
 	}
-	return result.OK("jira", "jira_get_issue", issue)
+	return result.OK("jira", "jira_get_issue", map[string]any{"issue": issue})
 }
 
+// AddIssueComment posts a single Jira comment and leaves role/group existence checks to Jira.
 func (s *Service) AddIssueComment(ctx context.Context, input AddCommentInput) result.Envelope {
 	cred, errEnv := s.requireCredential("jira_add_issue_comment")
 	if errEnv != nil {
@@ -113,10 +129,12 @@ func (s *Service) AddIssueComment(ctx context.Context, input AddCommentInput) re
 	}
 	body := map[string]any{"body": input.Body}
 	if input.Visibility != nil {
-		if input.Visibility.Value == "" || (input.Visibility.Type != "role" && input.Visibility.Type != "group") {
+		visibilityType := strings.TrimSpace(input.Visibility.Type)
+		visibilityValue := strings.TrimSpace(input.Visibility.Value)
+		if visibilityValue == "" || (visibilityType != "role" && visibilityType != "group") {
 			return result.Fail("jira", "jira_add_issue_comment", "VALIDATION_ERROR", "visibility requires type role or group and a value")
 		}
-		body["visibility"] = input.Visibility
+		body["visibility"] = Visibility{Type: visibilityType, Value: visibilityValue}
 	}
 	var comment map[string]any
 	if err := s.client.PostJSON(ctx, cred, "/issue/"+issueID+"/comment", body, &comment); err != nil {
@@ -125,6 +143,7 @@ func (s *Service) AddIssueComment(ctx context.Context, input AddCommentInput) re
 	return result.OK("jira", "jira_add_issue_comment", comment)
 }
 
+// UpdateIssueFields sends native Jira fields/update JSON and optionally reads back the issue once.
 func (s *Service) UpdateIssueFields(ctx context.Context, input UpdateIssueInput) result.Envelope {
 	cred, errEnv := s.requireCredential("jira_update_issue_fields")
 	if errEnv != nil {
@@ -153,6 +172,7 @@ func (s *Service) UpdateIssueFields(ctx context.Context, input UpdateIssueInput)
 	return s.refreshAfterMutation(ctx, cred, "jira_update_issue_fields", issueID, input.ReturnIssue, input.ReturnFields, input.ReturnExpand)
 }
 
+// TransitionIssue executes exactly one Jira workflow transition by direct ID or exact name match.
 func (s *Service) TransitionIssue(ctx context.Context, input TransitionIssueInput) result.Envelope {
 	cred, errEnv := s.requireCredential("jira_transition_issue")
 	if errEnv != nil {
@@ -162,11 +182,16 @@ func (s *Service) TransitionIssue(ctx context.Context, input TransitionIssueInpu
 	if invalid != nil {
 		return *invalid
 	}
-	if (input.TransitionID == "") == (input.TransitionName == "") {
+	if !input.ReturnIssue && (len(input.ReturnFields) > 0 || len(input.ReturnExpand) > 0) {
+		return result.Fail("jira", "jira_transition_issue", "VALIDATION_ERROR", "returnFields and returnExpand require returnIssue=true")
+	}
+	transitionIDBlank := strings.TrimSpace(input.TransitionID) == ""
+	transitionNameBlank := strings.TrimSpace(input.TransitionName) == ""
+	if transitionIDBlank == transitionNameBlank {
 		return result.Fail("jira", "jira_transition_issue", "VALIDATION_ERROR", "exactly one of transitionId or transitionName is required")
 	}
 	id := input.TransitionID
-	if input.TransitionName != "" {
+	if !transitionNameBlank {
 		resolved, err := s.resolveTransitionName(ctx, cred, issueID, input.TransitionName)
 		if err != nil {
 			return *err
@@ -186,6 +211,7 @@ func (s *Service) TransitionIssue(ctx context.Context, input TransitionIssueInpu
 	return s.refreshAfterMutation(ctx, cred, "jira_transition_issue", issueID, input.ReturnIssue, input.ReturnFields, input.ReturnExpand)
 }
 
+// requireCredential blocks business tools before jira_authenticate and deliberately sends no network request.
 func (s *Service) requireCredential(tool string) (auth.Credential, *result.Envelope) {
 	cred, err := s.store.Snapshot()
 	if errors.Is(err, auth.ErrNotAuthenticated) {
@@ -199,6 +225,7 @@ func (s *Service) requireCredential(tool string) (auth.Credential, *result.Envel
 	return cred, nil
 }
 
+// refreshAfterMutation reports the write as applied even when the optional read-back fails.
 func (s *Service) refreshAfterMutation(ctx context.Context, cred auth.Credential, tool, issue string, refresh bool, fields, expand []string) result.Envelope {
 	if !refresh {
 		return result.OK("jira", tool, map[string]any{"mutationApplied": true})
@@ -214,6 +241,7 @@ func (s *Service) refreshAfterMutation(ctx context.Context, cred auth.Credential
 	return result.OK("jira", tool, map[string]any{"mutationApplied": true, "issue": out})
 }
 
+// resolveTransitionName refuses to guess when Jira returns zero or multiple exact name matches.
 func (s *Service) resolveTransitionName(ctx context.Context, cred auth.Credential, issue, name string) (string, *result.Envelope) {
 	var payload struct {
 		Transitions []struct {
@@ -242,6 +270,7 @@ func (s *Service) resolveTransitionName(ctx context.Context, cred auth.Credentia
 	return matches[0], nil
 }
 
+// cleanIssueID keeps issue identifiers to one URL path segment before the client builds a request URL.
 func cleanIssueID(tool, value string) (string, *result.Envelope) {
 	id := strings.TrimSpace(value)
 	if id == "" {
@@ -255,6 +284,7 @@ func cleanIssueID(tool, value string) (string, *result.Envelope) {
 	return id, nil
 }
 
+// optionalQuery passes Jira fields/expand arrays as comma-joined native query values.
 func optionalQuery(fields, expand []string) map[string][]string {
 	query := map[string][]string{}
 	if len(fields) > 0 {
@@ -269,6 +299,7 @@ func optionalQuery(fields, expand []string) map[string][]string {
 	return query
 }
 
+// jiraClientError maps sanitized Jira client failures into the shared result envelope.
 func jiraClientError(tool, fallback string, err error) result.Envelope {
 	var httpErr *client.HTTPError
 	if errors.As(err, &httpErr) {

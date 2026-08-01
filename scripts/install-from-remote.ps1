@@ -42,9 +42,13 @@ function Die($Message) {
 
 # Runs an external command and preserves its real exit status as an installer failure.
 function Invoke-Checked($Command, [string[]]$Arguments) {
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Command failed with exit code $LASTEXITCODE"
+    $output = & $Command @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    foreach ($line in $output) {
+        Write-Host $line
+    }
+    if ($exitCode -ne 0) {
+        throw "$Command failed with exit code $exitCode"
     }
 }
 

@@ -4,7 +4,7 @@ Date: 2026-08-01
 
 ## Status
 
-Active
+Completed
 
 ## Outcome
 
@@ -53,9 +53,9 @@ Reuse the Bash installer behavior as the executable reference and implement the 
 - [x] Created active plan.
 - [x] Implement PowerShell installer and tests with RED/GREEN evidence.
 - [x] Run focused PowerShell validation.
-- [ ] Run repository validation.
+- [x] Run repository validation.
 - [x] Run code review gate narrowed to `scripts/install-from-remote.ps1`.
-- [ ] Move this plan to `docs/plans/completed/`.
+- [x] Move this plan to `docs/plans/completed/`.
 
 ## Decisions
 
@@ -71,8 +71,12 @@ Reuse the Bash installer behavior as the executable reference and implement the 
 - RED proof: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` failed because `scripts/install-from-remote.ps1` did not exist.
 - Focused proof: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed.
 - Syntax proof: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
-- Repository proof: `go test ./...` with local caches was started and then interrupted by the user; no pass is claimed.
+- Final focused proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed.
+- Final syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Final repository proof on 2026-08-01: `$env:GOCACHE='F:\CodeSource\atlassian-mcp\.tmp\go-build'; go test ./...` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after fixing command stdout leakage into the built binary path.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
 
 ## Result
 
-PowerShell installer and focused tests are implemented. Remaining concerns: repository-wide Go validation was interrupted, and no real Claude Code, Codex, Jira, or Bitbucket smoke test was run.
+PowerShell installer and focused tests are implemented and validated. A later regression fix prevents `go test` stdout from being captured as the built binary path. No real Claude Code, Codex, Jira, or Bitbucket smoke test was run because those checks are outside this plan's scope.

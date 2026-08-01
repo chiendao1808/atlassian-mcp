@@ -75,6 +75,9 @@ exit 0
     @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 Add-Content -LiteralPath $env:FAKE_LOG -Value ("go {0}" -f ($Args -join ' '))
+if ($Args[0] -eq 'test') {
+    Write-Output '?    github.com/chiendao1808/atlassian-mcp/cmd/atlassian-mcp    [no test files]'
+}
 if ($Args[0] -eq 'build') {
     $out = ''
     for ($i = 0; $i -lt $Args.Count; $i++) {

@@ -19,6 +19,13 @@ function Assert-File($Path) {
     }
 }
 
+# Asserts temporary worktrees are removed after successful remote installs.
+function Assert-PathMissing($Path) {
+    if (Test-Path -LiteralPath $Path) {
+        Fail "path still exists: $Path"
+    }
+}
+
 # Asserts generated content without coupling tests to private installer helpers.
 function Assert-Contains($Path, $Text) {
     $content = Get-Content -LiteralPath $Path -Raw
@@ -54,6 +61,18 @@ function Assert-Count($Path, $Text, $Want) {
     if ($got -ne $Want) {
         Fail "count for '$Text' in $Path = $got, want $Want"
     }
+}
+
+# Extracts the fake clone destination from the recorded git command.
+function Get-ClonedSourceDir($Log) {
+    $line = Get-Content -LiteralPath $Log | Where-Object { $_ -like 'git clone *' } | Select-Object -First 1
+    if ([string]::IsNullOrEmpty($line)) {
+        Fail 'missing git clone log line'
+    }
+    if ($line -notmatch '(?<path>[A-Z]:\\.*atlassian-mcp-src-[0-9a-f]+)$') {
+        Fail "could not parse clone destination: $line"
+    }
+    $Matches.path
 }
 
 # Creates fake external commands so installer behavior can be tested without network, Go, or host ACL changes.
@@ -187,6 +206,28 @@ function Test-HttpsRemotesCheckoutTestBuildAndInstallAtomically {
         Assert-Contains $result.Log 'go build -o'
         Assert-File (Join-Path $result.CaseDir 'install\atlassian-mcp.exe')
         Assert-File (Join-Path $result.CaseDir 'install\atlassian-mcp-run.ps1')
+        Assert-PathMissing (Get-ClonedSourceDir $result.Log)
+        if ($result.Output -notmatch 'cleaned cloned source') {
+            Fail "remote install did not report source cleanup: $($result.Output)"
+        }
+    }
+}
+
+function Test-KeepSourcePreservesCloneForDebugging {
+    $result = Invoke-InstallerSuccess 'keep-source' @(
+        '-SourceRepoUrl', 'https://github.com/acme/atlassian-mcp.git',
+        '-KeepSource',
+        '-Agents', 'None',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    )
+    $sourceDir = Get-ClonedSourceDir $result.Log
+    try {
+        if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
+            Fail "kept source was removed: $sourceDir"
+        }
+    } finally {
+        Remove-Item -LiteralPath $sourceDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -415,6 +456,7 @@ try {
     New-Item -ItemType Directory -Force -Path $TmpRoot | Out-Null
     $tests = @(
         'Test-HttpsRemotesCheckoutTestBuildAndInstallAtomically',
+        'Test-KeepSourcePreservesCloneForDebugging',
         'Test-SshRemoteIsPassedToGitWithoutProviderRewrite',
         'Test-EmbeddedCredentialsAreRejectedBeforeGit',
         'Test-ModuleValidationAndNonSecretConfig',

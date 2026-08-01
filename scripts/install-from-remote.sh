@@ -5,6 +5,7 @@ MARKER="atlassian-mcp managed block"
 BACKUP_PATHS=()
 BACKUP_FILES=()
 BACKUP_EXISTS=()
+install_succeeded="no"
 
 # Prints a fatal user-facing validation or execution error and terminates the installer.
 die() {
@@ -274,7 +275,7 @@ configure_agents() {
 
 # Clones the provider-neutral source remote and checks out the requested branch, tag, or commit.
 clone_source() {
-  source_dir="$(mktemp -d)"
+  source_dir="$(mktemp -d "${TMPDIR:-/tmp}/atlassian-mcp-src-XXXXXX")"
   git clone --depth "$source_clone_depth" "$source_repo_url" "$source_dir"
   (
     cd "$source_dir"
@@ -295,10 +296,17 @@ build_binary() {
   built_binary="$out"
 }
 
-# Removes cloned source on exit unless --keep-source was requested.
+# Removes cloned source after install, unless --keep-source was requested for debugging.
 cleanup_source() {
   if [[ -n "${source_dir:-}" && "$keep_source" != "yes" ]]; then
-    rm -rf "$source_dir"
+    local old_source_dir="$source_dir"
+    rm -rf "$old_source_dir"
+    if [[ -e "$old_source_dir" ]]; then
+      echo "warning: could not clean cloned source $old_source_dir" >&2
+    else
+      echo "cleaned cloned source $old_source_dir"
+      source_dir=""
+    fi
   fi
   return 0
 }
@@ -357,7 +365,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-trap cleanup_source EXIT
+trap '[[ "$install_succeeded" == "yes" ]] || cleanup_source' EXIT
 
 [[ -n "$binary" || -n "$source_repo_url" ]] || die "--source-repo-url is required unless --binary is used"
 [[ -n "$binary" || ! "$source_repo_url" =~ ^https?:// ]] || reject_embedded_credentials "$source_repo_url"
@@ -409,3 +417,5 @@ if [[ "$agents" != "none" ]]; then
 fi
 
 echo "installed atlassian-mcp to $installed_binary"
+install_succeeded="yes"
+cleanup_source

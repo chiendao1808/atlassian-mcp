@@ -665,189 +665,80 @@ Do not assume every error response is JSON. For HTML proxy errors or malformed r
 
 ## 10. Bitbucket module contracts and implementation coverage
 
-This document is authoritative for the Bitbucket module. Implementation agents must not depend on a separate historical Bitbucket plan.
+The endpoint-level authority for the Bitbucket module is [`bitbucket-tool-implementation-guide.md`](bitbucket-tool-implementation-guide.md). Implementation agents must use its per-tool source anchor, method/path, query/body, success, response, permission, error, retry, truncation, annotation, and test requirements. A shorter task description in this plan does not override that guide.
 
-### 10.1 Common Bitbucket rules
+### 10.1 Source hierarchy and stop condition
 
-- Core REST paths are pinned to `/rest/api/1.0`.
-- `BITBUCKET_PROJECT_KEY` is process configuration.
-- Every one of the 26 Bitbucket business tools requires `repositorySlug` in its input schema.
-- The outer tool input schema uses `additionalProperties: false`.
-- Tool input never accepts an absolute upstream URL or arbitrary HTTP headers.
-- Bearer authentication uses `BITBUCKET_BEARER_TOKEN`.
-- Pagination returns the upstream `start`, `limit`, `size`, `isLastPage`, and `nextPageStart`.
-- The implementation must use `nextPageStart`; it must never calculate the next cursor as `start + limit`.
-- Read requests may use bounded retry according to Section 9.4. Mutations are never blindly replayed.
-- Diff/file bodies are bounded by shared response limits and Bitbucket-specific configured limits.
-- `repositorySlug`, refs, commit IDs, path segments, and query parameters are encoded with endpoint-aware URL builders.
-- Results preserve upstream IDs, versions, refs, state, truncation flags, and error details under the shared envelope.
+1. Official Bitbucket Server 5.10.2 REST resource.
+2. The bundled reference, including its stable [Bitbucket MCP tool anchor index](../references/jira-6.4.14_bitbucket-5.10.2-rest-api-reference.md#20-bitbucket-mcp-tool-anchor-index).
+3. MCP restrictions and safety decisions in the implementation guide.
+4. Sanitized real-host contract evidence when the published reference is incomplete.
 
-### 10.2 Repository and branch tools
+Do not infer undocumented fields, enum values, status bodies, permissions, retryability, pagination, or identity conversion. Stop and raise a specification question when the source chain cannot determine the behavior.
 
-| Tool | Type | REST endpoint | Required/important input beyond `repositorySlug` | Result |
-|---|---|---|---|---|
-| `bitbucket_get_repository` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}` | none | Repository metadata |
-| `bitbucket_list_branches` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/branches` | optional `filterText`, `base`, `details`, `orderBy`, `start`, `limit` | Paged branches |
-| `bitbucket_get_default_branch` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/branches/default` | none | Default branch or explicit empty-repository result |
-| `bitbucket_create_branch` | Write | `POST /projects/{projectKey}/repos/{repositorySlug}/branches` | `name`, `startPoint`, optional `message` | Created branch |
+### 10.2 Common Bitbucket rules
 
-Rules:
+- Core REST paths are pinned to `/rest/api/1.0`; base URL context paths are preserved.
+- `BITBUCKET_PROJECT_KEY` is fixed process configuration and every business tool requires `repositorySlug`.
+- Inputs use `additionalProperties:false`; callers cannot supply absolute upstream URLs, arbitrary headers, project keys, or arbitrary participant identities.
+- Bearer auth uses `BITBUCKET_BEARER_TOKEN` and secrets/content are redacted from logs.
+- Genuine paged APIs preserve and follow `nextPageStart`; no cursor arithmetic or implicit fetch-all.
+- One-page and hard-capped changes/diff resources do not fabricate later pages.
+- Upstream hard caps/truncation and MCP response limits are represented separately.
+- Read retry follows the shared bounded policy. Branch creation, file commit, PR creation/comment/status/transition are sent at most once.
+- Error handling preserves sanitized upstream `errors[]` and endpoint context; notably, PR transition `409` is not automatically “stale version”.
 
-- `orderBy` accepts only values supported by Bitbucket 5.10.2.
-- Empty repository response `204` for default branch maps to `BITBUCKET_REPOSITORY_EMPTY`, not malformed JSON.
-- Branch creation is sent once and is not retried after an ambiguous response.
-- Branch results preserve `id`, `displayId`, `latestCommit`, `type`, and `isDefault`.
+### 10.3 Exact 26-tool registry and API links
 
-### 10.3 File, commit, compare, and diff read tools
+- [`bitbucket_get_repository`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_repository) — `GET /projects/{projectKey}/repos/{repositorySlug}`; 200 JSON repository.; REPO_READ on the repository.
+- [`bitbucket_list_branches`](bitbucket-tool-implementation-guide.md#tool-bitbucket_list_branches) — `GET /projects/{projectKey}/repos/{repositorySlug}/branches`; 200 JSON page.; REPO_READ.
+- [`bitbucket_get_default_branch`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_default_branch) — `GET /projects/{projectKey}/repos/{repositorySlug}/branches/default`; 200 JSON branch; 204 empty body when the repository has no default branch.; REPO_READ.
+- [`bitbucket_create_branch`](bitbucket-tool-implementation-guide.md#tool-bitbucket_create_branch) — `POST /projects/{projectKey}/repos/{repositorySlug}/branches`; 200 JSON branch.; REPO_WRITE.
+- [`bitbucket_get_file`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_file) — `GET /projects/{projectKey}/repos/{repositorySlug}/raw/{path:.*}`; 200 raw response body; upstream JSON error bodies for failures.; REPO_READ.
+- [`bitbucket_list_commits`](bitbucket-tool-implementation-guide.md#tool-bitbucket_list_commits) — `GET /projects/{projectKey}/repos/{repositorySlug}/commits`; 200 JSON page.; REPO_READ.
+- [`bitbucket_get_commit`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_commit) — `GET /projects/{projectKey}/repos/{repositorySlug}/commits/{commitId}`; 200 JSON commit.; REPO_READ.
+- [`bitbucket_get_commit_changes`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_commit_changes) — `GET /projects/{projectKey}/repos/{repositorySlug}/commits/{commitId}/changes`; 200 JSON change page/envelope.; REPO_READ.
+- [`bitbucket_get_commit_diff`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_commit_diff) — `GET /projects/{projectKey}/repos/{repositorySlug}/commits/{commitId}/diff/{path:.*}`; 200 JSON diff object.; REPO_READ.
+- [`bitbucket_compare_commits`](bitbucket-tool-implementation-guide.md#tool-bitbucket_compare_commits) — `GET /projects/{projectKey}/repos/{repositorySlug}/compare/commits`; 200 JSON page.; REPO_READ for repositories required by the comparison.
+- [`bitbucket_compare_changes`](bitbucket-tool-implementation-guide.md#tool-bitbucket_compare_changes) — `GET /projects/{projectKey}/repos/{repositorySlug}/compare/changes`; 200 JSON change page/envelope.; REPO_READ.
+- [`bitbucket_compare_diff`](bitbucket-tool-implementation-guide.md#tool-bitbucket_compare_diff) — `GET /projects/{projectKey}/repos/{repositorySlug}/compare/diff/{path:.*}`; 200 JSON diff.; REPO_READ.
+- [`bitbucket_commit_file`](bitbucket-tool-implementation-guide.md#tool-bitbucket_commit_file) — `PUT /projects/{projectKey}/repos/{repositorySlug}/browse/{path:.*}`; 200 JSON commit.; REPO_WRITE.
+- [`bitbucket_list_pull_requests`](bitbucket-tool-implementation-guide.md#tool-bitbucket_list_pull_requests) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests`; 200 JSON page.; REPO_READ.
+- [`bitbucket_get_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_pull_request) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}`; 200 JSON pull request.; REPO_READ.
+- [`bitbucket_get_pull_request_activities`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_pull_request_activities) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/activities`; 200 JSON page.; REPO_READ.
+- [`bitbucket_get_pull_request_commits`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_pull_request_commits) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/commits`; 200 JSON page.; REPO_READ.
+- [`bitbucket_get_pull_request_changes`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_pull_request_changes) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/changes`; 200 JSON one-page change envelope.; REPO_READ.
+- [`bitbucket_get_pull_request_diff`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_pull_request_diff) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/diff/{path:.*}`; 200 JSON diff.; REPO_READ.
+- [`bitbucket_check_pull_request_mergeability`](bitbucket-tool-implementation-guide.md#tool-bitbucket_check_pull_request_mergeability) — `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/merge`; 200 JSON mergeability object; upstream may return conflict/state errors for invalid PR states.; REPO_READ.
+- [`bitbucket_create_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_create_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests`; 201 JSON pull request.; REPO_READ on both source and target repositories according to the 5.10.2 endpoint.
+- [`bitbucket_add_pull_request_comment`](bitbucket-tool-implementation-guide.md#tool-bitbucket_add_pull_request_comment) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/comments`; 201 JSON comment.; REPO_READ; endpoint may also add the caller as watcher/participant behavior described upstream.
+- [`bitbucket_set_pull_request_review_status`](bitbucket-tool-implementation-guide.md#tool-bitbucket_set_pull_request_review_status) — `PUT /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/participants/{userSlug}`; 201 JSON participant.; REPO_READ.
+- [`bitbucket_merge_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_merge_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/merge`; 200 JSON merged pull request.; REPO_WRITE.
+- [`bitbucket_decline_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_decline_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/decline`; 200 response; preserve a JSON PR if supplied by the host, otherwise a successful empty result plus resolved version.; REPO_READ per the 5.10.2 endpoint documentation.
+- [`bitbucket_reopen_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_reopen_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/reopen`; 200 JSON reopened pull request.; REPO_READ.
 
-| Tool | Type | REST endpoint | Required/important input beyond `repositorySlug` | Result |
-|---|---|---|---|---|
-| `bitbucket_get_file` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/raw/{path}` | `path`, optional `at`, output `encoding=text\|base64` | File bytes plus encoding/size metadata |
-| `bitbucket_list_commits` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/commits` | optional `until`, `since`, `path`, `merges`, `followRenames`, `withCounts`, paging | Paged commits |
-| `bitbucket_get_commit` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/commits/{commitId}` | `commitId` | Commit metadata |
-| `bitbucket_get_commit_changes` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/commits/{commitId}/changes` | `commitId`, paging | Changed paths |
-| `bitbucket_get_commit_diff` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/commits/{commitId}/diff[/path]` | `commitId`, optional `path`, `srcPath`, `contextLines`, `whitespace` | Structured commit diff |
-| `bitbucket_compare_commits` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/compare/commits` | `from`, `to`, optional `fromRepositorySlug`, paging | Commits between refs |
-| `bitbucket_compare_changes` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/compare/changes` | `from`, `to`, optional `fromRepositorySlug`, paging | Changed paths between refs |
-| `bitbucket_compare_diff` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/compare/diff[/path]` | `from`, `to`, optional `fromRepositorySlug`, `path`, `srcPath`, `contextLines`, `whitespace` | Structured compare diff |
+### 10.4 High-risk contract decisions
 
-Rules:
+- Branch `orderBy`: `ALPHABETICAL|MODIFICATION`; default branch `204` is empty repository success.
+- Commit list includes `followRenames`, `ignoreMissing`, `merges`, `path`, `since`, `until`, `withCounts`.
+- Commit changes/diff implement documented hard caps and full query sets; no unsupported continuation is implied.
+- Compare `fromRepo` is derived only from `fromRepositorySlug` under `BITBUCKET_PROJECT_KEY`.
+- File commit is multipart PUT, one file, one request, with `sourceCommitId` stale-write safety.
+- PR participant filters are continuous indexed query names and capped at 10.
+- PR activities require `fromType` when `fromId` is supplied.
+- PR comments validate general/reply/file/line payloads separately.
+- Review status cannot ship until the host confirms configured slug versus body `user.name` compatibility.
+- Merge/decline/reopen preserve optimistic-lock version and distinguish conflict, veto, stale, and invalid state.
 
-- `since` is passed as the exclusive lower bound and `until` as the inclusive upper bound for commit listing.
-- `merges` is validated against the upstream-supported enum.
-- `fromRepositorySlug` is a slug only; cross-repository comparison never accepts an arbitrary URL or project.
-- Raw file handling detects invalid UTF-8/binary content and returns base64 when requested.
-- File bytes, source text, and diff hunks are never logged.
-- Both upstream `truncated=true` and MCP response-cap truncation are surfaced explicitly.
-- A caller receives `nextPageStart` rather than implicit auto-fetch of all pages.
-- Optional file paths are encoded one segment at a time and reject NUL and traversal segments.
+### 10.5 Documentation and test gate
 
-### 10.4 Single-file commit tool
+The registry is complete only when every tool has:
 
-| Tool | Type | REST endpoint | Required/important input beyond `repositorySlug` | Result |
-|---|---|---|---|---|
-| `bitbucket_commit_file` | Write/destructive | `PUT /projects/{projectKey}/repos/{repositorySlug}/browse/{path}` | `path`, `branch`, exactly one of `content`/`contentBase64`, `message`, optional `sourceCommitId`, `sourceBranch` | Newly created commit metadata |
-
-Rules:
-
-1. The MVP creates or updates exactly one file per call.
-2. Exactly one of `content` and `contentBase64` is required.
-3. Base64 content is decoded before size validation.
-4. Update mode requires `sourceCommitId` by default to prevent stale overwrite.
-5. Create mode omits `sourceCommitId`.
-6. Creating a new branch requires `sourceBranch`.
-7. Path must be non-empty and reject NUL and `..` segments.
-8. Request uses multipart form field `content` with `branch`, `message`, and optional source fields.
-9. The PUT is sent once; network ambiguity does not trigger a replay.
-10. HTTP `409` maps to `BITBUCKET_COMMIT_FILE_CONFLICT` with sanitized upstream details.
-11. Output states that the operation is a single-file commit.
-12. Multi-file atomic commit is outside scope.
-
-### 10.5 Pull-request read tools
-
-| Tool | Type | REST endpoint | Required/important input beyond `repositorySlug` | Result |
-|---|---|---|---|---|
-| `bitbucket_list_pull_requests` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests` | optional state/direction/ref/order/participant filters and paging | Paged PRs |
-| `bitbucket_get_pull_request` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}` | `pullRequestId` | Current PR including `version` |
-| `bitbucket_get_pull_request_activities` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/activities` | ID, optional activity cursor/type, paging | Activities/comments |
-| `bitbucket_get_pull_request_commits` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/commits` | ID, paging | PR commits |
-| `bitbucket_get_pull_request_changes` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/changes` | ID, optional range/scope/comment options | Changed paths |
-| `bitbucket_get_pull_request_diff` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/diff[/path]` | ID, optional path/range/context/whitespace | PR diff |
-| `bitbucket_check_pull_request_mergeability` | Read | `GET /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/merge` | ID | `canMerge`, conflicts, outcome, vetoes |
-
-Rules:
-
-- Preserve PR `id`, `version`, state flags, refs, author, reviewers, and participants.
-- Diff/change hard caps and truncation are explicit.
-- Read handlers do not mutate participant state or fetch unbounded pages.
-
-### 10.6 Pull-request mutation tools
-
-| Tool | Type | REST endpoint | Required/important input beyond `repositorySlug` | Result |
-|---|---|---|---|---|
-| `bitbucket_create_pull_request` | Write | `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests` | `title`, optional `description`, `fromBranch`, `toBranch`, optional reviewers/source repository slug | Created PR |
-| `bitbucket_add_pull_request_comment` | Write | `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/comments` | ID, `text`, optional `parentId`, optional inline `anchor` | Created comment |
-| `bitbucket_set_pull_request_review_status` | Write | `PUT /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/participants/{userSlug}` | ID, status enum | Current-user participant state |
-| `bitbucket_merge_pull_request` | Destructive | `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/merge?version=...` | ID, optional `expectedVersion`, optional `precheck` default true | Merged PR |
-| `bitbucket_decline_pull_request` | Destructive | `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/decline?version=...` | ID, optional `expectedVersion` | Declined PR |
-| `bitbucket_reopen_pull_request` | Destructive | `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/reopen?version=...` | ID, optional `expectedVersion` | Reopened PR |
-
-Create/comment rules:
-
-- Branch input is normalized to `refs/heads/...` exactly once.
-- Source and target repository objects use configured project key and explicit repository slugs.
-- Reviewers are caller-provided; the server does not add reviewers.
-- General, reply, and inline comments are supported only when required anchor fields are complete.
-- Empty or oversized comments fail locally.
-- POST create/comment requests are never blindly retried.
-
-Review-status rules:
-
-- Accepted statuses are `APPROVED`, `NEEDS_WORK`, and `UNAPPROVED`.
-- Payload mapping is:
-  - `APPROVED` → `approved=true`, `status=APPROVED`
-  - `NEEDS_WORK` → `approved=false`, `status=NEEDS_WORK`
-  - `UNAPPROVED` → `approved=false`, `status=UNAPPROVED`
-- Participant identity comes only from `BITBUCKET_USER_SLUG`.
-- The tool does not accept a caller-supplied arbitrary user slug.
-- Missing identity maps to `BITBUCKET_REVIEW_IDENTITY_REQUIRED`.
-
-PR optimistic-locking rules:
-
-1. When `expectedVersion` is supplied, use it unchanged.
-2. Otherwise fetch the PR once immediately before the transition and use its current `version`.
-3. Send the transition POST at most once.
-4. On `409`, optionally perform a safe GET for current state, then return `BITBUCKET_VERSION_CONFLICT`; do not POST again.
-5. Merge defaults to `precheck=true`.
-6. Merge precheck reads the merge endpoint and stops on conflict or veto with `BITBUCKET_MERGE_VETOED`.
-7. Decline and reopen validate the current PR state before POST.
-8. Every mutation is marked for coding-agent approval.
-
-### 10.7 Bitbucket registry and documentation gate
-
-The registry test must assert exactly these 26 tool names and no omitted/extra Bitbucket business tool:
-
-```text
-bitbucket_get_repository
-bitbucket_list_branches
-bitbucket_get_default_branch
-bitbucket_create_branch
-bitbucket_get_file
-bitbucket_list_commits
-bitbucket_get_commit
-bitbucket_get_commit_changes
-bitbucket_get_commit_diff
-bitbucket_compare_commits
-bitbucket_compare_changes
-bitbucket_compare_diff
-bitbucket_commit_file
-bitbucket_list_pull_requests
-bitbucket_get_pull_request
-bitbucket_get_pull_request_activities
-bitbucket_get_pull_request_commits
-bitbucket_get_pull_request_changes
-bitbucket_get_pull_request_diff
-bitbucket_check_pull_request_mergeability
-bitbucket_create_pull_request
-bitbucket_add_pull_request_comment
-bitbucket_set_pull_request_review_status
-bitbucket_merge_pull_request
-bitbucket_decline_pull_request
-bitbucket_reopen_pull_request
-```
-
-For every tool, tests must assert:
-
-- `repositorySlug` is required.
-- Unknown top-level properties are rejected.
-- Read/write/destructive annotations match the table.
-- Tool description states its upstream effect and important safety constraint.
-- Exact REST method/path/query/body is asserted against an HTTP recorder.
-- Successful result uses the shared structured envelope.
-- Upstream error bodies are sanitized and mapped without losing actionable messages.
-- Bearer token, file content, diff content, and comment text do not appear in logs.
-
----
+- a resolving bundled-source anchor and exact official resource heading;
+- request serialization and response-preservation contract tests;
+- permission/error/retry/truncation tests;
+- MCP schema and annotation snapshots;
+- a sanitized real-host fixture wherever the implementation guide declares a staging gate.
 
 ## 11. Installer interface: provider-neutral source repository
 
@@ -1103,6 +994,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 
 **Steps:**
 
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
+
 - [ ] Parse `BITBUCKET_BASE_URL`, `BITBUCKET_PROJECT_KEY`, `BITBUCKET_BEARER_TOKEN`, optional `BITBUCKET_USER_SLUG`, and `BITBUCKET_CA_FILE`.
 - [ ] Treat a completely absent Bitbucket configuration as module not requested.
 - [ ] Treat partial or invalid Bitbucket configuration as module disabled without blocking Jira.
@@ -1145,6 +1039,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 
 **Steps:**
 
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
+
 - [ ] Implement `bitbucket_get_repository`.
 - [ ] Implement `bitbucket_list_branches` with optional filters and upstream cursor pagination.
 - [ ] Implement `bitbucket_get_default_branch`, including empty repository `204`.
@@ -1180,6 +1077,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - Produces eight read-only tools for file and history inspection.
 
 **Steps:**
+
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
 
 - [ ] Implement `bitbucket_get_file` with text/base64 output and byte-size metadata.
 - [ ] Implement `bitbucket_list_commits` and `bitbucket_get_commit`.
@@ -1222,6 +1122,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - Produces `bitbucket_commit_file`.
 
 **Steps:**
+
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
 
 - [ ] Validate path, branch, message, and exactly one content input.
 - [ ] Decode base64 before applying maximum content size.
@@ -1269,6 +1172,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 
 **Steps:**
 
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
+
 - [ ] Implement PR list/get, activities, commits, changes, diff, and mergeability tools.
 - [ ] Implement create PR.
 - [ ] Normalize branch IDs to `refs/heads/...` exactly once.
@@ -1309,6 +1215,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - Produces `bitbucket_add_pull_request_comment` and `bitbucket_set_pull_request_review_status`.
 
 **Steps:**
+
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
 
 - [ ] Implement general comments.
 - [ ] Implement replies using `parentId`.
@@ -1351,6 +1260,9 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - Produces merge, decline, reopen tools and the complete 26-tool Bitbucket registry.
 
 **Steps:**
+
+- [ ] Implement only after reading the applicable per-tool contracts and source anchors in `docs/bitbucket-tool-implementation-guide.md`.
+- [ ] Add or update the bundled-reference link in every generated tool document; do not replace a documented contract with inference.
 
 - [ ] Implement shared expected-version resolution.
 - [ ] Use caller `expectedVersion` unchanged when supplied.

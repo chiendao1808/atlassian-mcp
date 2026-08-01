@@ -20,6 +20,10 @@ assert_file() {
   [[ -f "$1" ]] || fail "missing file: $1"
 }
 
+assert_path_missing() {
+  [[ ! -e "$1" ]] || fail "path still exists: $1"
+}
+
 assert_contains() {
   local file="$1"
   local text="$2"
@@ -41,6 +45,14 @@ assert_count() {
   local got
   got="$(grep -F -- "$text" "$file" 2>/dev/null | wc -l | tr -d ' ')"
   [[ "$got" == "$want" ]] || fail "count for '$text' in $file = $got, want $want"
+}
+
+get_cloned_source_dir() {
+  local log="$1"
+  local path
+  path="$(awk '/^git clone /{print $NF; exit}' "$log")"
+  [[ -n "$path" ]] || fail "missing git clone log line"
+  printf '%s\n' "$path"
 }
 
 # Creates fake git/go/cp/mv commands so installer tests prove command selection without network or host installs.
@@ -143,7 +155,21 @@ test_https_remotes_checkout_test_build_and_install_atomically() {
     assert_contains "$dir/commands.log" "mv"
     assert_file "$dir/install/atlassian-mcp"
     assert_file "$dir/install/atlassian-mcp-run"
+    assert_path_missing "$(get_cloned_source_dir "$dir/commands.log")"
   done
+}
+
+test_keep_source_preserves_clone_for_debugging() {
+  run_installer keep-source \
+    --source-repo-url https://github.com/acme/atlassian-mcp.git \
+    --keep-source \
+    --agents none \
+    --enable-jira \
+    --jira-base-url https://jira.internal.example.com/jira
+  local source_dir
+  source_dir="$(get_cloned_source_dir "$TMP_ROOT/keep-source/commands.log")"
+  [[ -d "$source_dir" ]] || fail "kept source was removed: $source_dir"
+  rm -rf "$source_dir"
 }
 
 test_ssh_remote_is_passed_to_git_without_provider_rewrite() {
@@ -369,6 +395,7 @@ test_final_paths_and_readme_bootstrap_contract() {
 
 for test_name in \
   test_https_remotes_checkout_test_build_and_install_atomically \
+  test_keep_source_preserves_clone_for_debugging \
   test_ssh_remote_is_passed_to_git_without_provider_rewrite \
   test_embedded_credentials_are_rejected_before_git \
   test_service_base_urls_reject_embedded_credentials \

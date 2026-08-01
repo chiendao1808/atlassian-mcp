@@ -33,6 +33,7 @@ $ErrorActionPreference = 'Stop'
 $Marker = 'atlassian-mcp managed block'
 $Script:Backups = @()
 $Script:SourceDir = ''
+$Script:InstallSucceeded = $false
 
 # Emits a validation or execution failure with the stable installer name for callers and tests.
 function Die($Message) {
@@ -366,10 +367,17 @@ function Build-Binary {
     return $out
 }
 
-# Removes cloned source on exit unless -KeepSource was requested.
+# Removes cloned source after install, unless -KeepSource was requested for debugging.
 function Cleanup-Source {
     if (-not $KeepSource -and -not [string]::IsNullOrEmpty($Script:SourceDir)) {
-        Remove-Item -LiteralPath $Script:SourceDir -Recurse -Force -ErrorAction SilentlyContinue
+        $sourceDir = $Script:SourceDir
+        Remove-Item -LiteralPath $sourceDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $sourceDir) {
+            Write-Warning "could not clean cloned source $sourceDir"
+        } else {
+            Write-Host "cleaned cloned source $sourceDir"
+            $Script:SourceDir = ''
+        }
     }
 }
 
@@ -446,6 +454,10 @@ try {
     }
 
     Write-Host "installed atlassian-mcp to $installedBinary"
-} finally {
+    $Script:InstallSucceeded = $true
     Cleanup-Source
+} finally {
+    if (-not $Script:InstallSucceeded) {
+        Cleanup-Source
+    }
 }

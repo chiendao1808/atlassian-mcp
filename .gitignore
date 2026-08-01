@@ -1,0 +1,7 @@
+# Harness core maintenance binary
+scripts/bin/harness
+scripts/bin/harness.exe
+
+.idea
+.tmp
+

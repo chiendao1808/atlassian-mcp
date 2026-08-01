@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "context": "branch",
+      "message": "Operation failed for token BITBUCKET_TOKEN_SENTINEL",
+      "exceptionName": "com.atlassian.bitbucket.AuthorisationException"
+    }
+  ]
+}

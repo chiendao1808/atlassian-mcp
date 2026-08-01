@@ -1,0 +1,454 @@
+schema_version: 1
+name: wf_feature_development
+display_name: Feature Development
+description: Deliver a clarified new feature or enhancement through exploration, optional design, approved planning, implementation,
+  verification, and code review.
+initial_state: REQUIREMENT_ANALYSIS
+terminal_states:
+- COMPLETED
+- CANCELLED
+runtime_state_template:
+  workflow_id: null
+  workflow_name: wf_feature_development
+  status: running
+  current_state: REQUIREMENT_ANALYSIS
+  previous_state: null
+  active_agent: req_analyzer
+  request:
+    summary: null
+    classification: new_feature
+    source_refs: []
+    acceptance_criteria: []
+  artifacts:
+    requirement_brief: null
+    supplied_implementation_plan: null
+    plan_review_report: null
+    exploration_report: null
+    design_spec: null
+    implementation_plan: null
+    implementation_report: null
+    documentation_updates: []
+    comment_coverage: []
+    review_report: null
+  approval:
+    required: false
+    status: not_required
+    requested_scope: []
+    approved_scope: []
+  execution:
+    retry_count: 0
+    review_cycle: 0
+    max_review_cycles: 3
+    blocker: null
+  metadata:
+    raw_context:
+      user_prompt: null
+      source_snapshots: []
+      agent_outputs: []
+    additional_context:
+      user_clarifications: []
+      repository_rules: []
+      project_skills: []
+      constraints: []
+      notes: []
+      workflow_selection: {}
+    tags: []
+    correlation: {}
+    updated_at: null
+  history: []
+states:
+  REQUIREMENT_ANALYSIS:
+    agent: req_analyzer
+    purpose: Normalize the feature goal and review any supplied implementation plan for reuse before new planning.
+    expected_outputs:
+    - requirement_brief
+    - blocking_questions
+    - feature_classification
+    - supplied_plan_review
+    - plan_reuse_recommendation
+    allowed_events:
+    - requirements_ready
+    - clarification_needed
+    - blocked
+    - cancelled
+    metadata:
+      raw_context_keys:
+      - user_prompt
+      - source_snapshots
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - workflow_selection
+  CLARIFICATION_REQUIRED:
+    agent: main
+    purpose: Obtain user answers for blocking requirement gaps.
+    approval_required: false
+    expected_outputs:
+    - user_clarifications
+    allowed_events:
+    - clarification_received
+    - cancelled
+    metadata:
+      raw_context_keys:
+      - user_prompt
+      additional_context_keys:
+      - user_clarifications
+      - notes
+  CODEBASE_EXPLORATION:
+    agent: explorer
+    purpose: Locate implementation surfaces, execution paths, dependencies, repository rules, and project skills relevant
+      to the feature.
+    expected_outputs:
+    - exploration_report
+    - design_requirement_decision
+    - unresolved_codebase_gaps
+    - supplied_plan_validation
+    allowed_events:
+    - design_required
+    - design_not_required
+    - blocked
+    - provided_plan_ready
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  DESIGN:
+    agent: designer
+    purpose: Produce an implementation-ready design specification or approved design artifact for UI/UX and interaction changes.
+    expected_outputs:
+    - design_spec
+    - design_assumptions
+    - design_questions
+    allowed_events:
+    - design_ready
+    - blocked
+    metadata:
+      raw_context_keys:
+      - source_snapshots
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  DESIGN_REVIEW:
+    agent: main
+    purpose: Present the design for explicit user review and approval.
+    approval_required: true
+    expected_outputs:
+    - design_approval_status
+    - approved_design_scope
+    allowed_events:
+    - approved
+    - changes_requested
+    - cancelled
+    - provided_plan_ready
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - notes
+  PLANNING:
+    agent: planner
+    purpose: Create a codebase-grounded implementation plan, or revise a reviewed supplied plan only where evidence requires
+      changes.
+    expected_outputs:
+    - implementation_plan
+    - plan_questions
+    - requested_implementation_scope
+    allowed_events:
+    - plan_ready
+    - clarification_needed
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  PLAN_REVIEW:
+    agent: main
+    purpose: Present the reused, revised, or newly created implementation plan and scope for explicit user approval.
+    approval_required: true
+    expected_outputs:
+    - plan_approval_status
+    - approved_scope
+    allowed_events:
+    - approved
+    - changes_requested
+    - rejected
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - notes
+  IMPLEMENTATION:
+    agent: implementer
+    purpose: Implement only the approved plan and scope.
+    expected_outputs:
+    - changed_files
+    - implementation_report
+    - documentation_updates
+    - comment_coverage
+    allowed_events:
+    - implementation_ready
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  SELF_VERIFICATION:
+    agent: implementer
+    purpose: Review the Git diff and run the narrowest appropriate compile or build validation.
+    expected_outputs:
+    - diff_summary
+    - verification_commands
+    - verification_result
+    - documentation_comment_check
+    allowed_events:
+    - verification_passed
+    - verification_failed
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - constraints
+      - notes
+  CODE_REVIEW:
+    agent: code_reviewer
+    purpose: Review the verified change set against repository rules, skills, contracts, side effects, and the detected stack.
+    expected_outputs:
+    - review_report
+    - review_findings
+    - review_summary
+    - documentation_comment_findings
+    allowed_events:
+    - review_accepted
+    - findings_found
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  REMEDIATION:
+    agent: implementer
+    purpose: Fix accepted review findings within the approved remediation scope.
+    expected_outputs:
+    - remediated_findings
+    - remediation_report
+    - documentation_updates
+    - comment_coverage
+    allowed_events:
+    - remediation_ready
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - constraints
+      - notes
+  BLOCKED:
+    agent: main
+    purpose: Preserve context and resolve missing information, permission, tooling, or scope blockers.
+    expected_outputs:
+    - blocker_resolution
+    - resume_target
+    allowed_events:
+    - resume_analysis
+    - resume_planning
+    - resume_implementation
+    - cancelled
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - notes
+  COMPLETED:
+    agent: main
+    purpose: Record the final implementation, verification, review, residual risks, and artifact references.
+    terminal: true
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - constraints
+      - notes
+  CANCELLED:
+    agent: main
+    purpose: Record cancellation or rejection without further execution.
+    terminal: true
+    metadata:
+      raw_context_keys: []
+      additional_context_keys:
+      - notes
+transitions:
+- from: REQUIREMENT_ANALYSIS
+  event: clarification_needed
+  to: CLARIFICATION_REQUIRED
+  guard: blocking_questions_present
+- from: CLARIFICATION_REQUIRED
+  event: clarification_received
+  to: REQUIREMENT_ANALYSIS
+  guard: user_response_recorded_and_resume_state_is_requirement_analysis
+- from: REQUIREMENT_ANALYSIS
+  event: requirements_ready
+  to: CODEBASE_EXPLORATION
+  guard: goal_scope_and_acceptance_criteria_sufficient
+- from: CODEBASE_EXPLORATION
+  event: design_required
+  to: DESIGN
+  guard: ui_ux_or_interaction_design_required
+- from: CODEBASE_EXPLORATION
+  event: design_not_required
+  to: PLANNING
+  guard: implementation_surfaces_identified
+- from: CODEBASE_EXPLORATION
+  event: provided_plan_ready
+  to: PLAN_REVIEW
+  guard: supplied_plan_review_recommends_reuse_and_exploration_confirms_scope_and_design_not_required
+- from: DESIGN
+  event: design_ready
+  to: DESIGN_REVIEW
+  guard: design_spec_complete
+- from: DESIGN_REVIEW
+  event: changes_requested
+  to: DESIGN
+  guard: user_requested_design_changes
+- from: DESIGN_REVIEW
+  event: approved
+  to: PLANNING
+  guard: explicit_user_design_approval
+- from: DESIGN_REVIEW
+  event: provided_plan_ready
+  to: PLAN_REVIEW
+  guard: explicit_user_design_approval_and_supplied_plan_covers_approved_design
+- from: PLANNING
+  event: plan_ready
+  to: PLAN_REVIEW
+  guard: no_blocking_plan_questions
+- from: PLAN_REVIEW
+  event: changes_requested
+  to: PLANNING
+  guard: user_requested_plan_changes
+- from: PLAN_REVIEW
+  event: approved
+  to: IMPLEMENTATION
+  guard: explicit_user_plan_approval_and_scope_recorded
+- from: PLAN_REVIEW
+  event: rejected
+  to: CANCELLED
+  guard: user_rejected_plan
+- from: IMPLEMENTATION
+  event: implementation_ready
+  to: SELF_VERIFICATION
+  guard: approved_changes_applied_with_documentation_and_comment_coverage
+- from: SELF_VERIFICATION
+  event: verification_failed
+  to: IMPLEMENTATION
+  guard: failure_within_approved_scope
+- from: SELF_VERIFICATION
+  event: verification_passed
+  to: CODE_REVIEW
+  guard: diff_reviewed_compile_or_build_passed_and_documentation_comment_coverage_confirmed
+- from: CODE_REVIEW
+  event: findings_found
+  to: REMEDIATION
+  guard: accepted_actionable_findings_present
+- from: CODE_REVIEW
+  event: review_accepted
+  to: COMPLETED
+  guard: no_blocking_findings_and_completion_artifacts_present
+- from: REMEDIATION
+  event: remediation_ready
+  to: SELF_VERIFICATION
+  guard: accepted_findings_addressed_with_documentation_and_comment_coverage
+- from: REQUIREMENT_ANALYSIS
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: CODEBASE_EXPLORATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: DESIGN
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: PLANNING
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: IMPLEMENTATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: SELF_VERIFICATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: CODE_REVIEW
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: REMEDIATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: BLOCKED
+  event: resume_analysis
+  to: REQUIREMENT_ANALYSIS
+  guard: analysis_blocker_resolved
+- from: BLOCKED
+  event: resume_planning
+  to: PLANNING
+  guard: planning_blocker_resolved
+- from: BLOCKED
+  event: resume_implementation
+  to: IMPLEMENTATION
+  guard: implementation_blocker_resolved_and_scope_approved
+- from: CLARIFICATION_REQUIRED
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled
+- from: REQUIREMENT_ANALYSIS
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled
+- from: DESIGN_REVIEW
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled
+- from: PLANNING
+  event: clarification_needed
+  to: CLARIFICATION_REQUIRED
+  guard: blocking_plan_questions_present_and_resume_state_recorded
+- from: CLARIFICATION_REQUIRED
+  event: clarification_received
+  to: PLANNING
+  guard: user_response_recorded_and_resume_state_is_planning
+- from: BLOCKED
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled

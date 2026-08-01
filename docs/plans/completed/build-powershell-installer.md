@@ -76,7 +76,19 @@ Reuse the Bash installer behavior as the executable reference and implement the 
 - Final repository proof on 2026-08-01: `$env:GOCACHE='F:\CodeSource\atlassian-mcp\.tmp\go-build'; go test ./...` passed.
 - Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after fixing command stdout leakage into the built binary path.
 - Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after preserving native stderr progress without turning it into a terminating installer error.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after preserving the root cause when selected agent configuration fails.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after changing Codex project config to launch the PowerShell wrapper through `powershell.exe` instead of executing `.ps1` directly.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after replacing existing files via `.NET File.Replace` instead of depending on `Move-Item -Force` overwrite behavior.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after granting current-user Modify ACL before replacing files created by earlier restrictive ACL logic.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
+- Regression proof on 2026-08-01: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-from-remote.Tests.ps1` passed after making the generated wrapper read the Bitbucket token from process env first and persisted User env second.
+- Regression syntax proof on 2026-08-01: PowerShell parser/token check for `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1` passed.
 
 ## Result
 
-PowerShell installer and focused tests are implemented and validated. A later regression fix prevents `go test` stdout from being captured as the built binary path. No real Claude Code, Codex, Jira, or Bitbucket smoke test was run because those checks are outside this plan's scope.
+PowerShell installer and focused tests are implemented and validated. Later regression fixes prevent external command output from being captured as the built binary path, prevent native stderr progress from becoming a terminating installer error, preserve root-cause details for selected-agent configuration failures, prevent Codex from trying to execute a `.ps1` file as a Win32 binary, make existing file replacement reliable on Windows, repair earlier restrictive installer ACLs before replacement, and allow the wrapper to read a persisted User env Bitbucket token. No real Claude Code, Codex, Jira, or Bitbucket smoke test was run because those checks are outside this plan's scope.

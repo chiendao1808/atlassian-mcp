@@ -75,6 +75,24 @@ func (c *Client) RepositoryFileEndpoint(repositorySlug, template, endpointName, 
 	return Endpoint{Path: p, Template: template}, nil
 }
 
+func (c *Client) RepositoryNestedFileEndpoint(repositorySlug, template string, baseSegments []string, filePath string) (Endpoint, error) {
+	fileSegments, err := cleanFilePath(filePath)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	pathParts := []string{"projects", c.projectKey, "repos", repositorySlug}
+	pathParts = append(pathParts, baseSegments...)
+	pathParts = append(pathParts, fileSegments...)
+	p, err := encodedPath(pathParts...)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	if template == "" {
+		template = p
+	}
+	return Endpoint{Path: p, Template: template}, nil
+}
+
 func encodedPath(parts ...string) (string, error) {
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {

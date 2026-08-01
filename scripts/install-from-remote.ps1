@@ -42,10 +42,13 @@ function Die($Message) {
 
 # Runs an external command and preserves its real exit status as an installer failure.
 function Invoke-Checked($Command, [string[]]$Arguments) {
-    $output = & $Command @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    foreach ($line in $output) {
-        Write-Host $line
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Command @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
     }
     if ($exitCode -ne 0) {
         throw "$Command failed with exit code $exitCode"
@@ -95,6 +98,15 @@ function Validate-TokenEnvName($Value) {
     }
 }
 
+# Reads an environment variable from the current process, then from the persisted user environment.
+function Get-EnvValue($Name) {
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrEmpty($value)) {
+        $value = [Environment]::GetEnvironmentVariable($Name, 'User')
+    }
+    return $value
+}
+
 # Resolves the home directory consistently for Windows PowerShell and PowerShell 7 hosts.
 function Get-HomeDir {
     if (-not [string]::IsNullOrEmpty($env:HOME)) {
@@ -107,6 +119,18 @@ function Get-HomeDir {
 }
 
 # Applies a restrictive ACL to newly created wrapper/config files when Windows exposes icacls.
+function Grant-CurrentUserModify($Path) {
+    if (-not (Get-Command icacls -ErrorAction SilentlyContinue)) {
+        return
+    }
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ([string]::IsNullOrEmpty($user)) {
+        return
+    }
+    & icacls $Path '/grant:r' "${user}:(M)" | Out-Null
+}
+
+# Applies a restrictive ACL to newly created wrapper/config files when Windows exposes icacls.
 function Protect-NewFileAcl($Path, [bool]$WasCreated) {
     if (-not $WasCreated) {
         return
@@ -114,11 +138,8 @@ function Protect-NewFileAcl($Path, [bool]$WasCreated) {
     if (-not (Get-Command icacls -ErrorAction SilentlyContinue)) {
         return
     }
-    $user = $env:USERNAME
-    if ([string]::IsNullOrEmpty($user)) {
-        return
-    }
-    & icacls $Path '/inheritance:r' '/grant:r' "${user}:(R,W)" | Out-Null
+    & icacls $Path '/inheritance:r' | Out-Null
+    Grant-CurrentUserModify $Path
 }
 
 # Records config state so a later agent-config failure can restore every earlier write.
@@ -157,6 +178,23 @@ function Cleanup-Backups {
     }
 }
 
+# Replaces an existing file with a sibling temp file without depending on Move-Item overwrite behavior.
+function Move-FileIntoPlace($From, $To) {
+    if (Test-Path -LiteralPath $To -PathType Leaf) {
+        Set-ItemProperty -LiteralPath $To -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+        Grant-CurrentUserModify $To
+        $replaceBackup = "$To.replace.$PID"
+        [System.IO.File]::Replace(
+            [System.IO.Path]::GetFullPath($From),
+            [System.IO.Path]::GetFullPath($To),
+            [System.IO.Path]::GetFullPath($replaceBackup)
+        )
+        Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
+        return
+    }
+    Move-Item -LiteralPath $From -Destination $To -Force
+}
+
 # Copies through a sibling temp file and renames into place so readers never observe partial files.
 function Copy-Atomically($From, $To) {
     if (Test-Path -LiteralPath $To -PathType Container) {
@@ -168,7 +206,7 @@ function Copy-Atomically($From, $To) {
     }
     $tmp = "$To.tmp.$PID"
     Copy-Item -LiteralPath $From -Destination $tmp -Force
-    Move-Item -LiteralPath $tmp -Destination $To -Force
+    Move-FileIntoPlace $tmp $To
 }
 
 # Writes generated content atomically, optionally with rollback backup and new-file ACL restriction.
@@ -186,7 +224,7 @@ function Write-FileAtomically($Content, $To, [bool]$Backup) {
     }
     $tmp = "$To.tmp.$PID"
     Set-Content -LiteralPath $tmp -Value $Content -Encoding ASCII
-    Move-Item -LiteralPath $tmp -Destination $To -Force
+    Move-FileIntoPlace $tmp $To
     Protect-NewFileAcl $To $created
 }
 
@@ -213,8 +251,10 @@ function Write-Wrapper($Wrapper, $BinaryPath) {
             $lines += '$env:BITBUCKET_CA_FILE = ''{0}''' -f (Escape-PowerShellLiteral $BitbucketCaFile)
         }
         # The secret remains in the launch environment; config stores only the variable name indirection.
-        $lines += 'if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable(''{0}''))) {{ Write-Error ''BITBUCKET token environment variable {0} is not set''; exit 1 }}' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
-        $lines += '$env:BITBUCKET_BEARER_TOKEN = [Environment]::GetEnvironmentVariable(''{0}'')' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
+        $lines += '$bitbucketToken = [Environment]::GetEnvironmentVariable(''{0}'')' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
+        $lines += 'if ([string]::IsNullOrEmpty($bitbucketToken)) {{ $bitbucketToken = [Environment]::GetEnvironmentVariable(''{0}'', ''User'') }}' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
+        $lines += 'if ([string]::IsNullOrEmpty($bitbucketToken)) {{ Write-Error ''BITBUCKET token environment variable {0} is not set''; exit 1 }}' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
+        $lines += '$env:BITBUCKET_BEARER_TOKEN = $bitbucketToken'
     }
     $lines += '& ''{0}'' @args' -f (Escape-PowerShellLiteral $BinaryPath)
     $lines += 'exit $LASTEXITCODE'
@@ -242,7 +282,8 @@ function New-CodexConfig($Path, $Command) {
     }
     $body += "# BEGIN $Marker"
     $body += '[mcp_servers.atlassian]'
-    $body += 'command = "{0}"' -f (Escape-TomlString $Command)
+    $body += 'command = "powershell.exe"'
+    $body += 'args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{0}"]' -f (Escape-TomlString $Command)
     $body += "# END $Marker"
     return ($body -join [Environment]::NewLine)
 }
@@ -372,7 +413,7 @@ try {
         }
         Require-ServiceUrl '-BitbucketBaseUrl' $BitbucketBaseUrl
         Validate-TokenEnvName $BitbucketTokenEnv
-        if ($NonInteractive -and [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($BitbucketTokenEnv))) {
+        if ($NonInteractive -and [string]::IsNullOrEmpty((Get-EnvValue $BitbucketTokenEnv))) {
             Die "$BitbucketTokenEnv is required for non-interactive Bitbucket installs"
         }
     }
@@ -400,7 +441,7 @@ try {
             Cleanup-Backups
         } catch {
             Rollback-Configs
-            Die 'failed to configure selected agents'
+            Die ("failed to configure selected agents: {0}" -f $_.Exception.Message)
         }
     }
 

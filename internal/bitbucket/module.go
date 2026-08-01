@@ -5,6 +5,7 @@ import (
 
 	"github.com/chiendao1808/atlassian-mcp/internal/app"
 	bbclient "github.com/chiendao1808/atlassian-mcp/internal/bitbucket/client"
+	"github.com/chiendao1808/atlassian-mcp/internal/bitbucket/tools"
 	"github.com/chiendao1808/atlassian-mcp/internal/config"
 	"github.com/chiendao1808/atlassian-mcp/internal/transport"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -44,6 +45,6 @@ func (m *Module) ValidateStaticConfig(shared config.Shared) error {
 	return nil
 }
 
-func (m *Module) RegisterTools(*mcp.Server) {
-	// Bitbucket business tools are implemented by follow-up tasks.
+func (m *Module) RegisterTools(server *mcp.Server) {
+	tools.NewService(m.client, m.cfg.UserSlug).Register(server)
 }

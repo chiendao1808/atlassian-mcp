@@ -63,6 +63,7 @@ function New-Fakes($Dir) {
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 Add-Content -LiteralPath $env:FAKE_LOG -Value ("git {0}" -f ($Args -join ' '))
 if ($Args[0] -eq 'clone') {
+    Write-Error ("Cloning into '{0}'..." -f $Args[$Args.Count - 1])
     $dest = $Args[$Args.Count - 1]
     New-Item -ItemType Directory -Force -Path (Join-Path $dest 'cmd\atlassian-mcp') | Out-Null
     Set-Content -LiteralPath (Join-Path $dest 'go.mod') -Value 'module example.com/atlassian-mcp' -Encoding ASCII
@@ -243,6 +244,9 @@ function Test-ModuleValidationAndNonSecretConfig {
     Assert-NotContains $claude 'BITBUCKET_SECRET_ENV'
     Assert-NotContains $codex 'super-secret-token'
     Assert-NotContains $claude 'super-secret-token'
+    Assert-Contains $codex 'command = "powershell.exe"'
+    Assert-Contains $codex 'args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",'
+    Assert-Contains $wrapper "GetEnvironmentVariable('BITBUCKET_SECRET_ENV', 'User')"
 
     $missing = Invoke-InstallerCase 'missing-project-key' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
@@ -312,6 +316,7 @@ function Test-AgentConfigEscapesWrapperPathForTomlAndJson {
         $env:PATHEXT = $oldPathext
     }
 
+    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'command = "powershell.exe"'
     Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'install space\\slash\\atlassian-mcp-run.ps1'
     Assert-Contains (Join-Path $caseDir 'project\.mcp.json') 'install space\\slash\\atlassian-mcp-run.ps1'
 }
@@ -365,6 +370,9 @@ function Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls {
         $ErrorActionPreference = $oldErrorActionPreference
         if ($exitCode -eq 0) {
             Fail 'config failure unexpectedly succeeded'
+        }
+        if (($output | Out-String) -notmatch 'refusing to replace directory\s+Claude config') {
+            Fail "config failure did not include root cause: $($output | Out-String)"
         }
     } finally {
         $env:PATH = $oldPath

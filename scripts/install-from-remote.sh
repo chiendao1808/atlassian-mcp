@@ -215,6 +215,7 @@ managed_codex_config() {
 }
 
 # Writes a managed Claude MCP file and refuses to overwrite unmanaged content without --replace.
+# Only used for --scope project; --scope local/user register through the claude CLI instead.
 managed_claude_config() {
   local path="$1"
   local command="$2"
@@ -236,14 +237,36 @@ JSON
   echo "$body"
 }
 
+# Ensures the Claude Code CLI is present before it is used to register the atlassian MCP server.
+require_claude_cli() {
+  command -v claude >/dev/null 2>&1 || die "claude CLI is required for --scope local/user; install it, use --scope project, or select --agents codex"
+}
+
+# Registers/updates the atlassian MCP server via the Claude Code CLI so the entry lands in Claude's
+# real config store instead of a hand-written file (writing directly to e.g. ~/.claude/settings.json
+# does not register an MCP server with Claude Code).
+configure_claude_cli() {
+  local command="$1"
+  require_claude_cli
+  (
+    cd "$project_dir" &&
+    { claude mcp remove atlassian --scope "$scope" >/dev/null 2>&1 || true; } &&
+    claude mcp add atlassian --scope "$scope" -- "$command"
+  ) || return 1
+  ( cd "$project_dir" && claude mcp get atlassian --scope "$scope" >/dev/null 2>&1 ) ||
+    echo "warning: could not verify atlassian MCP registration via claude mcp get" >&2
+}
+
 # Resolves user, local, and project config targets for the selected coding agents.
 config_paths() {
   case "$scope" in
     user)
       codex_config="$HOME/.codex/config.toml"
-      claude_config="$HOME/.claude/settings.json"
       ;;
-    local|project)
+    local)
+      codex_config="$project_dir/.codex/config.toml"
+      ;;
+    project)
       codex_config="$project_dir/.codex/config.toml"
       claude_config="$project_dir/.mcp.json"
       ;;
@@ -266,9 +289,16 @@ configure_agents() {
   esac
   case "$agents" in
     claude|both)
-      claude_content="$(managed_claude_config "$claude_config" "$command")" || return 1
-      write_file_atomically "$claude_content" "$claude_config" yes || return 1
-      rm -f "$claude_content"
+      case "$scope" in
+        project)
+          claude_content="$(managed_claude_config "$claude_config" "$command")" || return 1
+          write_file_atomically "$claude_content" "$claude_config" yes || return 1
+          rm -f "$claude_content"
+          ;;
+        *)
+          configure_claude_cli "$command" || return 1
+          ;;
+      esac
       ;;
   esac
 }

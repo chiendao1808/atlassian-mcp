@@ -109,7 +109,17 @@ FAKE_CP
 echo "mv $*" >>"$FAKE_LOG"
 exec /usr/bin/mv "$@"
 FAKE_MV
-  chmod +x "$dir/git" "$dir/go" "$dir/cp" "$dir/mv"
+  cat >"$dir/claude" <<'FAKE_CLAUDE'
+#!/usr/bin/env bash
+echo "claude $*" >>"$FAKE_LOG"
+case "$1 $2" in
+  "mcp remove") exit 1 ;;
+  "mcp add") exit 0 ;;
+  "mcp get") exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKE_CLAUDE
+  chmod +x "$dir/git" "$dir/go" "$dir/cp" "$dir/mv" "$dir/claude"
 }
 
 # Runs one isolated installer case with HOME, install dir, project dir, and PATH scoped to the test temp tree.
@@ -339,6 +349,49 @@ test_piped_installer_without_agents_fails_without_terminal() {
   [[ ! -e "$dir/project/.codex/config.toml" ]] || fail "piped installer wrote codex config without terminal agent choice"
 }
 
+test_claude_cli_registers_scope_local_and_user() {
+  local scope
+  for scope in user local; do
+    local dir="$TMP_ROOT/claude-cli-$scope"
+    mkdir -p "$dir/home" "$dir/install" "$dir/project"
+    make_fakes "$dir/bin"
+    FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+      bash "$INSTALLER" \
+        --binary "$REPO_ROOT/go.mod" \
+        --install-dir "$dir/install" \
+        --project-dir "$dir/project" \
+        --scope "$scope" \
+        --agents claude \
+        --enable-jira \
+        --jira-base-url https://jira.internal.example.com/jira \
+        --non-interactive
+    assert_contains "$dir/commands.log" "claude mcp add atlassian --scope $scope --"
+    assert_contains "$dir/commands.log" "claude mcp get atlassian --scope $scope"
+    [[ ! -e "$dir/home/.claude/settings.json" ]] || fail "installer wrote a Claude settings file for --scope $scope instead of using claude mcp add"
+    [[ ! -e "$dir/project/.mcp.json" ]] || fail "installer wrote .mcp.json for --scope $scope instead of using claude mcp add"
+  done
+}
+
+test_claude_cli_missing_binary_errors_clearly() {
+  local dir="$TMP_ROOT/claude-cli-missing"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes "$dir/bin"
+  rm -f "$dir/bin/claude"
+  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope user \
+      --agents claude \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-claude-missing.out 2>&1; then
+    fail "installer unexpectedly succeeded without claude CLI"
+  fi
+  assert_contains /tmp/installer-claude-missing.out "claude CLI is required"
+}
+
 test_rerun_is_idempotent_and_config_failure_rolls_back() {
   run_installer idem \
     --binary "$REPO_ROOT/go.mod" \
@@ -403,6 +456,8 @@ for test_name in \
   test_non_interactive_bitbucket_requires_token_env_value \
   test_agent_config_escapes_wrapper_path_for_toml_and_json \
   test_piped_installer_without_agents_fails_without_terminal \
+  test_claude_cli_registers_scope_local_and_user \
+  test_claude_cli_missing_binary_errors_clearly \
   test_rerun_is_idempotent_and_config_failure_rolls_back \
   test_dry_run_validates_without_side_effects \
   test_final_paths_and_readme_bootstrap_contract

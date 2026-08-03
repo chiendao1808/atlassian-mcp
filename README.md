@@ -74,6 +74,8 @@ The Bash installer is committed at the stable repository-root path:
 scripts/install-from-remote.sh
 ```
 
+When `--agents claude`/`both` is combined with the default `--scope user` (or `--scope local`), the installer registers the server by shelling out to `claude mcp add` instead of writing a config file, so the `claude` CLI must already be installed and on `PATH`. Only `--scope project` writes a `.mcp.json` file directly.
+
 ### Set required environment variables (Bash, user scope)
 
 The installer never accepts secrets as arguments; it reads the Bitbucket bearer token from the environment variable named by `--bitbucket-token-env` (default `BITBUCKET_BEARER_TOKEN`) only at wrapper runtime. Set it once for your user account so it survives new shells/terminals, then export it in the current shell before running the installer:
@@ -135,8 +137,8 @@ Do not put credentials in the raw URL or `--source-repo-url`. Use SSH, a Git cre
 | `--source-clone-depth` | No | `1` | `1` | Depth passed to `git clone`/`git fetch` for the source checkout. |
 | `--keep-source` | No (flag) | — | disabled (source is cleaned up after a successful install) | Keeps the temporary cloned checkout on disk after install, for debugging. |
 | `--install-dir` | No | `/home/me/.local/bin` | `$HOME/.local/bin` | Directory the built/provided binary and the generated wrapper script are installed into. |
-| `--agents` | Yes, unless run interactively | `both` (`claude`\|`codex`\|`both`\|`none`) | prompted on a TTY; error with `--non-interactive` | Selects which coding agent config(s) to write: Codex TOML, Claude MCP JSON, both, or none. |
-| `--scope` | No | `user` (`local`\|`project`\|`user`) | `user` | Chooses whether agent configs are written to the user home directory or to `--project-dir`. |
+| `--agents` | Yes, unless run interactively | `both` (`claude`\|`codex`\|`both`\|`none`) | prompted on a TTY; error with `--non-interactive` | Selects which coding agent to register: Codex TOML, Claude, both, or none. For `--scope local`/`user`, Claude is registered by invoking the `claude` CLI (`claude mcp add`) instead of writing a config file; the `claude` CLI must be on `PATH`. |
+| `--scope` | No | `user` (`local`\|`project`\|`user`) | `user` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `--project-dir`). For Claude: `local`/`user` register via the `claude` CLI; `project` writes `--project-dir/.mcp.json`. |
 | `--project-dir` | No | `/home/me/projects/atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `--scope` is `local`/`project`. |
 | `--enable-jira` | No (flag; at least one of `--enable-jira`/`--enable-bitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper. |
 | `--jira-base-url` | Yes, if `--enable-jira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
@@ -150,7 +152,7 @@ Do not put credentials in the raw URL or `--source-repo-url`. Use SSH, a Git cre
 | `--atlassian-tls-verify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper enables TLS certificate verification for Jira/Bitbucket requests. |
 | `--skip-tests` | No (flag) | — | disabled (`go test ./...` runs before build) | Skips running the repository test suite before building the binary from source. |
 | `--dry-run` | No (flag) | — | disabled | Validates all arguments and exits without cloning, building, installing, or writing any config. |
-| `--replace` | No (flag) | — | disabled (refuses to overwrite an unmanaged Claude config) | Allows overwriting an existing Claude MCP config file that wasn't previously managed by this installer. |
+| `--replace` | No (flag) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `--scope project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `--scope local`/`user`, which register through the `claude` CLI and are idempotent by design. |
 | `--non-interactive` | No (flag) | — | disabled (prompts for `--agents` if omitted) | Disables the interactive `--agents` prompt and any other terminal prompts; missing required values become hard errors. |
 | `-h`, `--help` | No (flag) | — | disabled | Prints usage text and exits. |
 
@@ -161,6 +163,8 @@ The PowerShell installer is committed at the stable repository-root path:
 ```text
 scripts/install-from-remote.ps1
 ```
+
+When `-Agents Claude`/`Both` is combined with the default `-Scope User` (or `-Scope Local`), the installer registers the server by shelling out to `claude mcp add` instead of writing a config file, so the `claude` CLI must already be installed and on `PATH`. Only `-Scope Project` writes a `.mcp.json` file directly.
 
 ### Set required environment variables (PowerShell, user scope)
 
@@ -224,8 +228,8 @@ PowerShell 7 users may replace `powershell.exe` with `pwsh`. Do not put credenti
 | `-SourceCloneDepth` | No | `1` | `1` | Depth passed to `git clone`/`git fetch` for the source checkout. |
 | `-KeepSource` | No (switch) | — | disabled (source is cleaned up after a successful install) | Keeps the temporary cloned checkout on disk after install, for debugging. |
 | `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the built/provided binary and the generated wrapper script are installed into. |
-| `-Agents` | Yes, unless run interactively | `Both` (`Claude`\|`Codex`\|`Both`\|`None`) | prompted on a TTY; error with `-NonInteractive` | Selects which coding agent config(s) to write: Codex TOML, Claude MCP JSON, both, or none. |
-| `-Scope` | No | `User` (`Local`\|`Project`\|`User`) | `User` | Chooses whether agent configs are written to the user home directory or to `-ProjectDir`. |
+| `-Agents` | Yes, unless run interactively | `Both` (`Claude`\|`Codex`\|`Both`\|`None`) | prompted on a TTY; error with `-NonInteractive` | Selects which coding agent to register: Codex TOML, Claude, both, or none. For `-Scope Local`/`User`, Claude is registered by invoking the `claude` CLI (`claude mcp add`) instead of writing a config file; the `claude` CLI must be on `PATH`. |
+| `-Scope` | No | `User` (`Local`\|`Project`\|`User`) | `User` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `-ProjectDir`). For Claude: `Local`/`User` register via the `claude` CLI; `Project` writes `-ProjectDir\.mcp.json`. |
 | `-ProjectDir` | No | `C:\Users\me\projects\atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `-Scope` is `Local`/`Project`. |
 | `-EnableJira` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper. |
 | `-JiraBaseUrl` | Yes, if `-EnableJira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
@@ -239,5 +243,5 @@ PowerShell 7 users may replace `powershell.exe` with `pwsh`. Do not put credenti
 | `-AtlassianTlsVerify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper enables TLS certificate verification for Jira/Bitbucket requests. |
 | `-SkipTests` | No (switch) | — | disabled (`go test ./...` runs before build) | Skips running the repository test suite before building the binary from source. |
 | `-DryRun` | No (switch) | — | disabled | Validates all arguments and exits without cloning, building, installing, or writing any config. |
-| `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | Allows overwriting an existing Claude MCP config file that wasn't previously managed by this installer. |
+| `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `-Scope Project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `-Scope Local`/`User`, which register through the `claude` CLI and are idempotent by design. |
 | `-NonInteractive` | No (switch) | — | disabled (prompts for `-Agents` if omitted) | Disables the interactive `-Agents` prompt; missing required values become hard errors. |

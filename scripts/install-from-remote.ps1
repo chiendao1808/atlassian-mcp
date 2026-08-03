@@ -290,6 +290,7 @@ function New-CodexConfig($Path, $Command) {
 }
 
 # Produces Claude MCP JSON and refuses unmanaged existing content unless -Replace is supplied.
+# Only used for -Scope Project; -Scope Local/User register through the claude CLI instead.
 function New-ClaudeConfig($Path, $Command) {
     if ((Test-Path -LiteralPath $Path) -and -not $Replace) {
         if (Test-Path -LiteralPath $Path -PathType Container) {
@@ -312,13 +313,52 @@ function New-ClaudeConfig($Path, $Command) {
 "@
 }
 
+# Ensures the Claude Code CLI is present before it is used to register the atlassian MCP server.
+function Require-ClaudeCli {
+    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+        Die 'claude CLI is required for -Scope Local/User; install it, use -Scope Project, or select -Agents Codex'
+    }
+}
+
+# Registers/updates the atlassian MCP server via the Claude Code CLI so the entry lands in Claude's
+# real config store instead of a hand-written file (writing directly to e.g. ~/.claude/settings.json
+# does not register an MCP server with Claude Code).
+function Configure-ClaudeCli($Command) {
+    Require-ClaudeCli
+    $claudeScope = $Scope.ToLowerInvariant()
+    $oldErrorActionPreference = $ErrorActionPreference
+    Push-Location $ProjectDir
+    try {
+        # Native stderr must be drained under $ErrorActionPreference='Continue'; otherwise Windows
+        # PowerShell 5.1 turns any stderr line from claude.exe into a terminating NativeCommandError.
+        $ErrorActionPreference = 'Continue'
+        & claude mcp remove atlassian --scope $claudeScope 2>&1 | Out-Null
+        $ErrorActionPreference = $oldErrorActionPreference
+        Invoke-Checked 'claude' @('mcp', 'add', 'atlassian', '--scope', $claudeScope, '--', $Command)
+        $ErrorActionPreference = 'Continue'
+        & claude mcp get atlassian --scope $claudeScope 2>&1 | Out-Null
+        $getExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($getExitCode -ne 0) {
+            Write-Warning 'could not verify atlassian MCP registration via claude mcp get'
+        }
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        Pop-Location
+    }
+}
+
 # Resolves user, local, and project agent config paths for the selected scope.
 function Get-ConfigPaths {
     $homeDir = Get-HomeDir
     if ($Scope -eq 'User') {
         return [pscustomobject]@{
             Codex = Join-Path $homeDir '.codex\config.toml'
-            Claude = Join-Path $homeDir '.claude\settings.json'
+        }
+    }
+    if ($Scope -eq 'Local') {
+        return [pscustomobject]@{
+            Codex = Join-Path $ProjectDir '.codex\config.toml'
         }
     }
     return [pscustomobject]@{
@@ -334,7 +374,11 @@ function Configure-Agents($Command) {
         Write-FileAtomically (New-CodexConfig $paths.Codex $Command) $paths.Codex $true
     }
     if ($Agents -eq 'Claude' -or $Agents -eq 'Both') {
-        Write-FileAtomically (New-ClaudeConfig $paths.Claude $Command) $paths.Claude $true
+        if ($Scope -eq 'Project') {
+            Write-FileAtomically (New-ClaudeConfig $paths.Claude $Command) $paths.Claude $true
+        } else {
+            Configure-ClaudeCli $Command
+        }
     }
 }
 

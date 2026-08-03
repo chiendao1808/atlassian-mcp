@@ -117,6 +117,14 @@ param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 Add-Content -LiteralPath $env:FAKE_LOG -Value ("icacls {0}" -f ($Args -join ' '))
 exit 0
 '@ | Set-Content -LiteralPath (Join-Path $Dir 'icacls.ps1') -Encoding ASCII
+    @'
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+Add-Content -LiteralPath $env:FAKE_LOG -Value ("claude {0}" -f ($Args -join ' '))
+if ($Args[0] -eq 'mcp' -and $Args[1] -eq 'remove') {
+    exit 1
+}
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $Dir 'claude.ps1') -Encoding ASCII
 }
 
 # Runs one isolated installer invocation with HOME, USERPROFILE, PATH, and project/install directories scoped to the case.
@@ -362,6 +370,103 @@ function Test-AgentConfigEscapesWrapperPathForTomlAndJson {
     Assert-Contains (Join-Path $caseDir 'project\.mcp.json') 'install space\\slash\\atlassian-mcp-run.ps1'
 }
 
+function Test-ClaudeCliRegistersScopeLocalAndUser {
+    foreach ($scope in @('User', 'Local')) {
+        $caseDir = Join-Path $TmpRoot "claude-cli-$scope"
+        New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project'), (Join-Path $caseDir 'bin') | Out-Null
+        New-Fakes (Join-Path $caseDir 'bin')
+
+        $oldPath = $env:PATH
+        $oldHome = $env:HOME
+        $oldUserProfile = $env:USERPROFILE
+        $oldFakeLog = $env:FAKE_LOG
+        $oldPathext = $env:PATHEXT
+        try {
+            $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+            $env:PATHEXT = ".PS1;$oldPathext"
+            $env:HOME = Join-Path $caseDir 'home'
+            $env:USERPROFILE = Join-Path $caseDir 'home'
+            $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+            $oldErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+                -Binary (Join-Path $RepoRoot 'go.mod') `
+                -InstallDir (Join-Path $caseDir 'install') `
+                -ProjectDir (Join-Path $caseDir 'project') `
+                -Scope $scope `
+                -Agents Claude `
+                -EnableJira `
+                -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+                -NonInteractive *>&1
+            $exitCode = $LASTEXITCODE
+            $ErrorActionPreference = $oldErrorActionPreference
+            if ($exitCode -ne 0) {
+                Fail "claude CLI scope $scope failed: $($output | Out-String)"
+            }
+        } finally {
+            $env:PATH = $oldPath
+            $env:HOME = $oldHome
+            $env:USERPROFILE = $oldUserProfile
+            $env:FAKE_LOG = $oldFakeLog
+            $env:PATHEXT = $oldPathext
+        }
+
+        $log = Join-Path $caseDir 'commands.log'
+        Assert-Contains $log ("claude mcp add atlassian --scope {0} --" -f $scope.ToLowerInvariant())
+        Assert-Contains $log ("claude mcp get atlassian --scope {0}" -f $scope.ToLowerInvariant())
+        Assert-PathMissing (Join-Path $caseDir 'home\.claude\settings.json')
+        Assert-PathMissing (Join-Path $caseDir 'project\.mcp.json')
+    }
+}
+
+function Test-ClaudeCliMissingBinaryErrorsClearly {
+    $caseDir = Join-Path $TmpRoot 'claude-cli-missing'
+    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project'), (Join-Path $caseDir 'bin') | Out-Null
+    New-Fakes (Join-Path $caseDir 'bin')
+    Remove-Item -LiteralPath (Join-Path $caseDir 'bin\claude.ps1') -Force
+
+    $oldPath = $env:PATH
+    $oldHome = $env:HOME
+    $oldUserProfile = $env:USERPROFILE
+    $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT
+    try {
+        # Deliberately excludes $oldPath: a real claude CLI may be installed on the host running
+        # these tests, and this case must prove behavior when no claude binary can be found at all.
+        $env:PATH = "$(Join-Path $caseDir 'bin');$env:SystemRoot\System32;$env:SystemRoot"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $caseDir 'home'
+        $env:USERPROFILE = Join-Path $caseDir 'home'
+        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope User `
+            -Agents Claude `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($exitCode -eq 0) {
+            Fail 'installer unexpectedly succeeded without claude CLI'
+        }
+        # Nested error rendering can hard-wrap the message, so tolerate whitespace/newlines between words.
+        if ((($output | Out-String) -replace '\s+', ' ') -notmatch 'claude\s*CLI is required') {
+            Fail "missing claude CLI error did not mention requirement: $($output | Out-String)"
+        }
+    } finally {
+        $env:PATH = $oldPath
+        $env:HOME = $oldHome
+        $env:USERPROFILE = $oldUserProfile
+        $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext
+    }
+}
+
 function Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls {
     $result = Invoke-InstallerSuccess 'idem' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
@@ -462,6 +567,8 @@ try {
         'Test-ModuleValidationAndNonSecretConfig',
         'Test-NonInteractiveBitbucketRequiresTokenEnvValue',
         'Test-AgentConfigEscapesWrapperPathForTomlAndJson',
+        'Test-ClaudeCliRegistersScopeLocalAndUser',
+        'Test-ClaudeCliMissingBinaryErrorsClearly',
         'Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls',
         'Test-DryRunValidatesWithoutSideEffects',
         'Test-FinalPathsAndReadmeBootstrapContract'

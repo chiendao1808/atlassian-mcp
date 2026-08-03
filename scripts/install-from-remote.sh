@@ -241,7 +241,7 @@ config_paths() {
   case "$scope" in
     user)
       codex_config="$HOME/.codex/config.toml"
-      claude_config="$HOME/.claude/atlassian-mcp.mcp.json"
+      claude_config="$HOME/.claude/settings.json"
       ;;
     local|project)
       codex_config="$project_dir/.codex/config.toml"

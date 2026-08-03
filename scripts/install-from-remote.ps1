@@ -318,7 +318,7 @@ function Get-ConfigPaths {
     if ($Scope -eq 'User') {
         return [pscustomobject]@{
             Codex = Join-Path $homeDir '.codex\config.toml'
-            Claude = Join-Path $homeDir '.claude\atlassian-mcp.mcp.json'
+            Claude = Join-Path $homeDir '.claude\settings.json'
         }
     }
     return [pscustomobject]@{

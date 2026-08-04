@@ -136,11 +136,12 @@ func (s *Service) CreatePullRequest(ctx context.Context, in createPRInput) resul
 	if in.FromRepositorySlug != "" {
 		fromRepo = in.FromRepositorySlug
 	}
+	projectKey := s.client.ProjectKey()
 	body := map[string]any{
 		"title":       in.Title,
 		"description": in.Description,
-		"fromRef":     ref(in.FromBranch, fromRepo),
-		"toRef":       ref(in.ToBranch, in.RepositorySlug),
+		"fromRef":     ref(in.FromBranch, fromRepo, projectKey),
+		"toRef":       ref(in.ToBranch, in.RepositorySlug, projectKey),
 	}
 	if len(in.Reviewers) > 0 {
 		body["reviewers"] = in.Reviewers
@@ -227,14 +228,17 @@ func prPath(id int, parts ...string) string {
 	return strings.Join(all, "/")
 }
 
-func ref(branch, repo string) map[string]any {
+func ref(branch, repo, projectKey string) map[string]any {
 	id := branch
 	if !strings.HasPrefix(id, "refs/heads/") {
 		// Normalize short branch names while preserving already-qualified Bitbucket ref IDs.
 		id = "refs/heads/" + strings.TrimPrefix(id, "/")
 	}
 	return map[string]any{
-		"id":         id,
-		"repository": map[string]any{"slug": repo},
+		"id": id,
+		"repository": map[string]any{
+			"slug":    repo,
+			"project": map[string]any{"key": projectKey},
+		},
 	}
 }

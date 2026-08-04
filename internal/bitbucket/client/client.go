@@ -45,6 +45,11 @@ func New(base, projectKey, token string, hc *http.Client, maxResponseBytes int64
 	return &Client{baseURL: u, projectKey: projectKey, token: token, httpClient: hc, maxResponseBytes: maxResponseBytes, options: options}
 }
 
+// ProjectKey returns the configured Bitbucket project key (BITBUCKET_PROJECT_KEY).
+func (c *Client) ProjectKey() string {
+	return c.projectKey
+}
+
 func (c *Client) RepositoryEndpoint(repositorySlug, template string, segments ...string) (Endpoint, error) {
 	pathParts := []string{"projects", c.projectKey, "repos", repositorySlug}
 	pathParts = append(pathParts, segments...)

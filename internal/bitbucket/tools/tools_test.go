@@ -119,4 +119,39 @@ func TestNestedDiffPathAndPullRequestTransitionVersion(t *testing.T) {
 	}
 }
 
+func TestCreatePullRequestIncludesProjectKeyInRefs(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	out := svc.CreatePullRequest(context.Background(), createPRInput{
+		RepositorySlug: "repo",
+		Title:          "title",
+		FromBranch:     "feature",
+		ToBranch:       "main",
+	})
+	if !out.Success {
+		t.Fatalf("create out=%+v", out)
+	}
+
+	fromRef := body["fromRef"].(map[string]any)
+	fromRepo := fromRef["repository"].(map[string]any)
+	if _, ok := fromRepo["project"]; !ok {
+		t.Fatalf("fromRef.repository missing project key: %+v", fromRepo)
+	}
+	toRef := body["toRef"].(map[string]any)
+	toRepo := toRef["repository"].(map[string]any)
+	toProject, ok := toRepo["project"].(map[string]any)
+	if !ok {
+		t.Fatalf("toRef.repository missing project key: %+v", toRepo)
+	}
+	if toProject["key"] != "PRJ" {
+		t.Fatalf("toRef.repository.project.key = %v, want PRJ", toProject["key"])
+	}
+}
+
 func intPtr(v int) *int { return &v }

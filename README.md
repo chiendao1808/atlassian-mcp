@@ -38,6 +38,8 @@ Runtime uses MCP stdio. Protocol messages are written to `stdout`; logs and star
 
 Jira tools are registered when `JIRA_BASE_URL` is statically valid. Call `jira_authenticate` once per MCP process session before using Jira issue tools.
 
+`jira_authenticate` accepts `username`/`password` as tool input, or falls back to the `JIRA_USERNAME`/`JIRA_PASSWORD` environment variables when either field is omitted ([ADR-0004](docs/decisions/0004-jira-credential-env-fallback.md)). When both variables are already set at process startup, the server also authenticates automatically in the background right after startup, so no `jira_authenticate` call is needed at all in that case ([ADR-0005](docs/decisions/0005-jira-auto-authenticate-on-startup.md)). See [docs/security.md](docs/security.md) for the tradeoffs of each source.
+
 Bitbucket configuration is isolated from Jira startup. The Bitbucket module includes the shared REST client foundation for later repository and pull-request tools, but business tools are implemented by the follow-up Bitbucket tasks.
 
 ## Contents
@@ -166,22 +168,37 @@ scripts/install-from-remote.ps1
 
 When `-Agents Claude`/`Both` is combined with the default `-Scope User` (or `-Scope Local`), the installer registers the server by shelling out to `claude mcp add` instead of writing a config file, so the `claude` CLI must already be installed and on `PATH`. Only `-Scope Project` writes a `.mcp.json` file directly.
 
-There is no wrapper script. The installer registers `atlassian-mcp.exe` directly with Claude/Codex and persists all non-secret module config, plus the resolved Bitbucket token, as Windows **User** environment variables (`ATLASSIAN_TLS_VERIFY`, `JIRA_BASE_URL`, `JIRA_CA_FILE`, `BITBUCKET_BASE_URL`, `BITBUCKET_PROJECT_KEY`, `BITBUCKET_USER_SLUG`, `BITBUCKET_CA_FILE`, `BITBUCKET_BEARER_TOKEN`) so the binary can read them directly at startup. **Restart Claude Code, Codex, and any open terminal** after installing/reinstalling — Windows only hands newly persisted User environment variables to processes started *after* the change, not to ones already running.
+There is no wrapper script. The installer registers `atlassian-mcp.exe` directly with Claude/Codex and resolves all non-secret module config, plus the Bitbucket token and (if `-JiraUsername` is set) the Jira credential, into one set of environment variables (`ATLASSIAN_TLS_VERIFY`, `JIRA_BASE_URL`, `JIRA_CA_FILE`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `BITBUCKET_BASE_URL`, `BITBUCKET_PROJECT_KEY`, `BITBUCKET_USER_SLUG`, `BITBUCKET_CA_FILE`, `BITBUCKET_BEARER_TOKEN`). Those values reach the binary two different ways depending on the client, because Claude Code and Codex disagree on whether a spawned MCP server inherits the launching process's environment:
+
+- **Claude Code** spawns the binary inheriting the ambient process environment, so the installer persists this set as Windows **User** environment variables (`[Environment]::SetEnvironmentVariable(..., 'User')`) and that is enough.
+- **Codex does not** pass its own ambient environment through to spawned stdio MCP servers (confirmed from Codex's own logs: the binary started with every module disabled until this was fixed). The installer therefore also writes the same values directly into an explicit `[mcp_servers.atlassian.env]` table in `config.toml` — this is the one place this installer deliberately puts secret values (the Bitbucket token and, if configured, the Jira password) into an agent config file, and only for Codex.
+
+**Restart Claude Code, Codex, and any open terminal** after installing/reinstalling — Windows only hands newly persisted User environment variables to processes started *after* the change, not to ones already running. (Codex additionally always needs a restart regardless, since its copy lives in `config.toml`, re-read only at Codex startup.)
 
 ### Set required environment variables (PowerShell, user scope)
 
-The installer never accepts secrets as arguments; it reads the Bitbucket bearer token from the environment variable named by `-BitbucketTokenEnv` (default `BITBUCKET_BEARER_TOKEN`) only while persisting installer configuration, and writes the resolved value to the `BITBUCKET_BEARER_TOKEN` User environment variable so the binary can read it directly. Persist the indirection variable in the Windows per-user environment store so it survives new PowerShell/terminal sessions, then reload the current session before running the installer:
+The installer never accepts secrets as arguments directly on the command line. It reads two secrets through env var name *indirection* only while resolving installer configuration, then writes the resolved values to fixed-name User environment variables (and, for Codex, into `config.toml`) so the binary can read them directly:
+
+- The Bitbucket bearer token, from the variable named by `-BitbucketTokenEnv` (default `BITBUCKET_BEARER_TOKEN`) -> written to `BITBUCKET_BEARER_TOKEN`.
+- The Jira password, from the variable named by `-JiraPasswordEnv` (default `JIRA_PASSWORD`, only resolved when `-JiraUsername` is set) -> written to `JIRA_PASSWORD`.
+
+Persist the indirection variables in the Windows per-user environment store so they survive new PowerShell/terminal sessions, then reload the current session before running the installer:
 
 ```powershell
 # Persist for the user account (Windows User environment store)
 [Environment]::SetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', '<your-bitbucket-token>', 'User')
+[Environment]::SetEnvironmentVariable('JIRA_PASSWORD', '<your-jira-password>', 'User')
 
-# Load it into the current session (or open a new terminal)
+# Load them into the current session (or open a new terminal)
 $env:BITBUCKET_BEARER_TOKEN = [Environment]::GetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', 'User')
+$env:JIRA_PASSWORD = [Environment]::GetEnvironmentVariable('JIRA_PASSWORD', 'User')
 
-# Confirm it is visible to the process the installer will run in
+# Confirm they are visible to the process the installer will run in
 $env:BITBUCKET_BEARER_TOKEN
+$env:JIRA_PASSWORD
 ```
+
+Skip the Jira line entirely if you do not want `jira_authenticate` to have a credential fallback (see ADR-0004) or automatic startup authentication (see ADR-0005) — omitting `-JiraUsername` from the install command below leaves that feature off.
 
 Fetch it from the canonical GitHub raw URL to a temporary file, then run that file explicitly:
 
@@ -203,6 +220,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerFile `
   -EnableJira `
   -JiraBaseUrl 'https://jira.internal.example.com/jira' `
   -JiraCaFile 'C:\certs\jira-internal-ca.pem' `
+  -JiraUsername 'svc-atlassian-mcp' `
+  -JiraPasswordEnv 'JIRA_PASSWORD' `
   -EnableBitbucket `
   -BitbucketBaseUrl 'https://bitbucket.internal.example.com' `
   -BitbucketProjectKey 'ABC' `
@@ -236,14 +255,55 @@ PowerShell 7 users may replace `powershell.exe` with `pwsh`. Do not put credenti
 | `-EnableJira` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Jira module and persists `JIRA_BASE_URL`/`JIRA_CA_FILE` as User environment variables. |
 | `-JiraBaseUrl` | Yes, if `-EnableJira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
 | `-JiraCaFile` | No | `C:\certs\jira-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Jira server's TLS certificate. |
+| `-JiraUsername` | No (requires `-EnableJira`) | `svc-atlassian-mcp` | *(empty)* | Jira username resolved into `JIRA_USERNAME`, letting `jira_authenticate` fall back to it (ADR-0004) and enabling automatic startup authentication when the password is also present (ADR-0005). Omit entirely to leave both features off. |
+| `-JiraPasswordEnv` | No | `JIRA_PASSWORD` | `JIRA_PASSWORD` | Name of the environment variable the installer reads the Jira password from at install time when `-JiraUsername` is set; the resolved value is persisted to the `JIRA_PASSWORD` User environment variable and, for Codex, written into `config.toml` (see the note above `.mcp.json`/`config.toml` handling). |
 | `-EnableBitbucket` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Bitbucket module and persists its base URL/project key/resolved token as User environment variables. |
 | `-BitbucketBaseUrl` | Yes, if `-EnableBitbucket` | `https://bitbucket.internal.example.com` | *(empty)* | Base URL of the Bitbucket instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
 | `-BitbucketProjectKey` | Yes, if `-EnableBitbucket` | `ABC` | *(empty)* | Bitbucket project key that scopes the repository/pull-request tools. |
 | `-BitbucketUserSlug` | No | `jane.doe` | *(empty)* | Bitbucket user slug used where tools need to identify the acting user. |
-| `-BitbucketTokenEnv` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the installer reads the Bitbucket bearer token from at install time; the resolved value is then persisted to the `BITBUCKET_BEARER_TOKEN` User environment variable, never written to Claude/Codex config. |
+| `-BitbucketTokenEnv` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the installer reads the Bitbucket bearer token from at install time; the resolved value is persisted to the `BITBUCKET_BEARER_TOKEN` User environment variable and, for Codex, also written into `config.toml` (never into Claude's config either way). |
 | `-BitbucketCaFile` | No | `C:\certs\bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
 | `-AtlassianTlsVerify` | No | `false` (`true`\|`false`) | `false` | Persisted as the `ATLASSIAN_TLS_VERIFY` User environment variable, controlling TLS certificate verification for Jira/Bitbucket requests. |
 | `-SkipTests` | No (switch) | — | disabled (`go test ./...` runs before build) | Skips running the repository test suite before building the binary from source. |
 | `-DryRun` | No (switch) | — | disabled | Validates all arguments and exits without cloning, building, installing, or writing any config. |
 | `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `-Scope Project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `-Scope Local`/`User`, which register through the `claude` CLI and are idempotent by design. |
 | `-NonInteractive` | No (switch) | — | disabled (prompts for `-Agents` if omitted) | Disables the interactive `-Agents` prompt; missing required values become hard errors. |
+
+### Testing a local build (no GitHub fetch)
+
+To try a change from a local checkout instead of the raw GitHub URL, use `-Binary` with a
+binary built from this repo, and run `scripts/install-from-remote.ps1` straight from disk:
+
+```powershell
+$RepoRoot = '.\atlassian-mcp'
+$LocalBinary = Join-Path $env:TEMP 'atlassian-mcp.exe'
+Push-Location $RepoRoot
+go build -o $LocalBinary ./cmd/atlassian-mcp
+Pop-Location
+
+[Environment]::SetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', '<your-bitbucket-token>', 'User')
+[Environment]::SetEnvironmentVariable('JIRA_PASSWORD', '<your-jira-password>', 'User')
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$RepoRoot\scripts\install-from-remote.ps1" `
+  -Binary $LocalBinary `
+  -InstallDir (Join-Path $HOME '.local\bin') `
+  -Agents Both `
+  -Scope User `
+  -EnableJira `
+  -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+  -JiraUsername 'svc-atlassian-mcp' `
+  -JiraPasswordEnv 'JIRA_PASSWORD' `
+  -EnableBitbucket `
+  -BitbucketBaseUrl 'https://bitbucket.internal.example.com' `
+  -BitbucketProjectKey 'ABC' `
+  -BitbucketTokenEnv 'BITBUCKET_BEARER_TOKEN' `
+  -AtlassianTlsVerify false `
+  -NonInteractive
+
+# Reload the persisted values into THIS PowerShell session, so `atlassian-mcp.exe` can be
+# tested directly here without opening a new terminal. This does not reach Codex/Claude
+# Code -- they are separate processes and still need a full restart to see the new config.
+foreach ($name in @('ATLASSIAN_TLS_VERIFY', 'JIRA_BASE_URL', 'JIRA_USERNAME', 'JIRA_PASSWORD', 'BITBUCKET_BASE_URL', 'BITBUCKET_PROJECT_KEY', 'BITBUCKET_USER_SLUG', 'BITBUCKET_BEARER_TOKEN')) {
+    Set-Item -Path "Env:$name" -Value ([Environment]::GetEnvironmentVariable($name, 'User'))
+}
+```

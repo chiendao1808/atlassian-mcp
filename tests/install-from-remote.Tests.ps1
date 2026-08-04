@@ -11,7 +11,7 @@ $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-ps-instal
 # per-test $env:HOME override, so the whole suite snapshots and restores them to avoid leaving test
 # values behind on the machine running these tests.
 $PersistedEnvKeys = @(
-    'ATLASSIAN_TLS_VERIFY', 'JIRA_BASE_URL', 'JIRA_CA_FILE',
+    'ATLASSIAN_TLS_VERIFY', 'JIRA_BASE_URL', 'JIRA_CA_FILE', 'JIRA_USERNAME', 'JIRA_PASSWORD',
     'BITBUCKET_BASE_URL', 'BITBUCKET_PROJECT_KEY', 'BITBUCKET_USER_SLUG',
     'BITBUCKET_CA_FILE', 'BITBUCKET_BEARER_TOKEN'
 )
@@ -296,13 +296,15 @@ function Test-ModuleValidationAndNonSecretConfig {
         '-Agents', 'Both',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
+        '-JiraUsername', 'jira-svc',
+        '-JiraPasswordEnv', 'JIRA_SECRET_ENV',
         '-EnableBitbucket',
         '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
         '-BitbucketProjectKey', 'PRJ',
         '-BitbucketUserSlug', 'svc-atlassian-mcp',
         '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV',
         '-AtlassianTlsVerify', 'true'
-    ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token' }
+    ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token'; JIRA_SECRET_ENV = 'super-secret-password' }
 
     $codex = Join-Path $result.CaseDir 'project\.codex\config.toml'
     $claude = Join-Path $result.CaseDir 'project\.mcp.json'
@@ -311,9 +313,14 @@ function Test-ModuleValidationAndNonSecretConfig {
     # touched here and must stay secret-free.
     Assert-NotContains $codex 'BITBUCKET_SECRET_ENV'
     Assert-NotContains $claude 'BITBUCKET_SECRET_ENV'
+    Assert-NotContains $codex 'JIRA_SECRET_ENV'
+    Assert-NotContains $claude 'JIRA_SECRET_ENV'
     Assert-Contains $codex '[mcp_servers.atlassian.env]'
     Assert-Contains $codex 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
+    Assert-Contains $codex 'JIRA_USERNAME = "jira-svc"'
+    Assert-Contains $codex 'JIRA_PASSWORD = "super-secret-password"'
     Assert-NotContains $claude 'super-secret-token'
+    Assert-NotContains $claude 'super-secret-password'
     Assert-Contains $codex 'args = []'
     if ((Get-Content -LiteralPath $codex -Raw).IndexOf('powershell.exe', [System.StringComparison]::Ordinal) -ge 0) {
         Fail "codex config should invoke the binary directly, not powershell.exe: $codex"
@@ -338,6 +345,12 @@ function Test-ModuleValidationAndNonSecretConfig {
     }
     if ([Environment]::GetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', 'User') -ne 'super-secret-token') {
         Fail 'BITBUCKET_BEARER_TOKEN was not resolved from BITBUCKET_SECRET_ENV and persisted'
+    }
+    if ([Environment]::GetEnvironmentVariable('JIRA_USERNAME', 'User') -ne 'jira-svc') {
+        Fail 'JIRA_USERNAME was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('JIRA_PASSWORD', 'User') -ne 'super-secret-password') {
+        Fail 'JIRA_PASSWORD was not resolved from JIRA_SECRET_ENV and persisted'
     }
 
     $missing = Invoke-InstallerCase 'missing-project-key' @(
@@ -364,6 +377,34 @@ function Test-NonInteractiveBitbucketRequiresTokenEnvValue {
     ) @{}
     if ($result.ExitCode -eq 0 -or $result.Output -notmatch 'UNSET_BITBUCKET_TOKEN') {
         Fail "missing token env was not rejected: $($result.Output)"
+    }
+}
+
+function Test-JiraUsernameRequiresEnableJiraAndPasswordEnv {
+    $noJira = Invoke-InstallerCase 'jira-username-without-enable' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableBitbucket',
+        '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
+        '-BitbucketProjectKey', 'PRJ',
+        '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV',
+        '-JiraUsername', 'jira-svc'
+    ) @{ BITBUCKET_SECRET_ENV = 'token' }
+    if ($noJira.ExitCode -eq 0 -or $noJira.Output -notmatch '-JiraUsername requires -EnableJira') {
+        Fail "-JiraUsername without -EnableJira was not rejected: $($noJira.Output)"
+    }
+
+    Remove-Item Env:UNSET_JIRA_PASSWORD -ErrorAction SilentlyContinue
+    $missingPassword = Invoke-InstallerCase 'jira-username-missing-password' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
+        '-JiraUsername', 'jira-svc',
+        '-JiraPasswordEnv', 'UNSET_JIRA_PASSWORD'
+    ) @{}
+    if ($missingPassword.ExitCode -eq 0 -or $missingPassword.Output -notmatch 'UNSET_JIRA_PASSWORD') {
+        Fail "missing Jira password env was not rejected: $($missingPassword.Output)"
     }
 }
 
@@ -610,6 +651,7 @@ try {
         'Test-EmbeddedCredentialsAreRejectedBeforeGit',
         'Test-ModuleValidationAndNonSecretConfig',
         'Test-NonInteractiveBitbucketRequiresTokenEnvValue',
+        'Test-JiraUsernameRequiresEnableJiraAndPasswordEnv',
         'Test-AgentConfigEscapesBinaryPathForTomlAndJson',
         'Test-ClaudeCliRegistersScopeLocalAndUser',
         'Test-ClaudeCliMissingBinaryErrorsClearly',

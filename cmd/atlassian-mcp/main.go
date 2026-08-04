@@ -27,11 +27,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	server, statuses := app.NewServer(version, shared, os.Stderr, jira.NewModule(os.Getenv), bitbucket.NewModule(os.Getenv, os.Stderr))
+	jiraModule := jira.NewModule(os.Getenv)
+	server, statuses := app.NewServer(version, shared, os.Stderr, jiraModule, bitbucket.NewModule(os.Getenv, os.Stderr))
 	if !statuses["jira"].Enabled && !statuses["bitbucket"].Enabled {
 		fmt.Fprintln(os.Stderr, "no Atlassian business module enabled")
 	}
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	ctx := context.Background()
+	if statuses["jira"].Enabled {
+		go jiraModule.AutoAuthenticate(ctx, os.Stderr)
+	}
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -13,6 +13,8 @@ param(
     [switch]$EnableJira,
     [string]$JiraBaseUrl = '',
     [string]$JiraCaFile = '',
+    [string]$JiraUsername = '',
+    [string]$JiraPasswordEnv = 'JIRA_PASSWORD',
     [switch]$EnableBitbucket,
     [string]$BitbucketBaseUrl = '',
     [string]$BitbucketProjectKey = '',
@@ -256,6 +258,18 @@ function Get-ResolvedConfigEnv {
     if (-not [string]::IsNullOrEmpty($JiraCaFile)) {
         $envVars['JIRA_CA_FILE'] = $JiraCaFile
     }
+    if (-not [string]::IsNullOrEmpty($JiraUsername)) {
+        # Optional: lets jira_authenticate skip its chat-input step (ADR-0004) and, when
+        # combined with the process starting with these already set, authenticate
+        # automatically at startup (ADR-0005). Resolved via -JiraPasswordEnv indirection so
+        # the password itself is never a command-line argument, mirroring -BitbucketTokenEnv.
+        $jiraPassword = Get-EnvValue $JiraPasswordEnv
+        if ([string]::IsNullOrEmpty($jiraPassword)) {
+            Die "JIRA password environment variable $JiraPasswordEnv is not set"
+        }
+        $envVars['JIRA_USERNAME'] = $JiraUsername
+        $envVars['JIRA_PASSWORD'] = $jiraPassword
+    }
     if ($EnableBitbucket) {
         $envVars['BITBUCKET_BASE_URL'] = $BitbucketBaseUrl
         $envVars['BITBUCKET_PROJECT_KEY'] = $BitbucketProjectKey
@@ -490,6 +504,15 @@ try {
             Die '-JiraBaseUrl is required with -EnableJira'
         }
         Require-ServiceUrl '-JiraBaseUrl' $JiraBaseUrl
+    }
+    if (-not [string]::IsNullOrEmpty($JiraUsername)) {
+        if (-not $EnableJira) {
+            Die '-JiraUsername requires -EnableJira'
+        }
+        Validate-TokenEnvName $JiraPasswordEnv
+        if ($NonInteractive -and [string]::IsNullOrEmpty((Get-EnvValue $JiraPasswordEnv))) {
+            Die "$JiraPasswordEnv is required for non-interactive installs when -JiraUsername is set"
+        }
     }
     if ($EnableBitbucket) {
         if ([string]::IsNullOrEmpty($BitbucketBaseUrl)) {

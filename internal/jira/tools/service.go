@@ -16,20 +16,23 @@ import (
 type Service struct {
 	client *client.Client
 	store  *auth.SessionStore
+	getenv func(string) string
 }
 
-// NewService binds Jira REST access and session storage for MCP tool execution.
-func NewService(client *client.Client, store *auth.SessionStore) *Service {
-	return &Service{client: client, store: store}
+// NewService binds Jira REST access, session storage, and env var lookup (used as a
+// jira_authenticate fallback) for MCP tool execution.
+func NewService(client *client.Client, store *auth.SessionStore, getenv func(string) string) *Service {
+	return &Service{client: client, store: store, getenv: getenv}
 }
 
 // Store exposes the session store for module wiring and focused tests.
 func (s *Service) Store() *auth.SessionStore { return s.store }
 
-// AuthenticateInput carries the only Jira credential payload accepted by the toolset.
+// AuthenticateInput carries the Jira credential payload accepted by the toolset. Either
+// field may be omitted to fall back to JIRA_USERNAME/JIRA_PASSWORD.
 type AuthenticateInput struct {
-	Username string `json:"username" jsonschema:"Jira username"`
-	Password string `json:"password" jsonschema:"Sensitive Jira password"`
+	Username string `json:"username,omitempty" jsonschema:"Jira username; falls back to JIRA_USERNAME if omitted"`
+	Password string `json:"password,omitempty" jsonschema:"Sensitive Jira password; falls back to JIRA_PASSWORD if omitted"`
 }
 
 // GetIssueInput selects one Jira issue and optional native Jira query expansions.
@@ -75,12 +78,20 @@ type TransitionIssueInput struct {
 }
 
 // Authenticate verifies candidate credentials with Jira before replacing the active process session.
+// Explicit tool input wins; an empty field falls back to JIRA_USERNAME/JIRA_PASSWORD read at call time.
 func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) result.Envelope {
 	username := strings.TrimSpace(input.Username)
-	if username == "" || input.Password == "" {
-		return result.Fail("jira", "jira_authenticate", "VALIDATION_ERROR", "username and password are required")
+	password := input.Password
+	if username == "" && s.getenv != nil {
+		username = strings.TrimSpace(s.getenv("JIRA_USERNAME"))
 	}
-	candidate := auth.NewCredential(username, input.Password)
+	if password == "" && s.getenv != nil {
+		password = s.getenv("JIRA_PASSWORD")
+	}
+	if username == "" || password == "" {
+		return result.Fail("jira", "jira_authenticate", "VALIDATION_ERROR", "username and password are required (pass them as tool input or set JIRA_USERNAME/JIRA_PASSWORD)")
+	}
+	candidate := auth.NewCredential(username, password)
 	var serverInfo map[string]any
 	if err := s.client.GetJSON(ctx, candidate, "/serverInfo", nil, &serverInfo); err != nil {
 		return jiraClientError("jira_authenticate", "JIRA_AUTHENTICATION_FAILED", err)

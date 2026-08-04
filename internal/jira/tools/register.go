@@ -12,7 +12,7 @@ func Definitions() []*mcp.Tool {
 	additive := false
 	destructive := true
 	return []*mcp.Tool{
-		{Name: "jira_authenticate", Description: "Authenticate this MCP process session to Jira with a username and sensitive password. Review client logging/history policy before use.", Annotations: &mcp.ToolAnnotations{OpenWorldHint: &open}},
+		{Name: "jira_authenticate", Description: "Authenticate this MCP process session to Jira. Uses JIRA_USERNAME/JIRA_PASSWORD when set; otherwise username and password must be passed as tool input -- review client logging/history policy before doing so.", Annotations: &mcp.ToolAnnotations{OpenWorldHint: &open}},
 		{Name: "jira_get_issue", Description: "Read one Jira issue. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}},
 		{Name: "jira_add_issue_comment", Description: "Add a Jira issue comment. Requires jira_authenticate first and may require client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
 		{Name: "jira_update_issue_fields", Description: "Update Jira issue fields using native Jira fields/update JSON. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},

@@ -3,16 +3,20 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
+// TestForbiddenCredentialEnvironmentNamesStayOutOfImplementation guards the remaining forbidden
+// alt-name/token env vars from SPECS.md Sec 4.2. JIRA_USERNAME/JIRA_PASSWORD were removed from this
+// list by ADR-0004 (docs/decisions/0004-jira-credential-env-fallback.md), which allows
+// jira_authenticate to fall back to them when the tool call omits username/password. Matching uses
+// word boundaries so the still-forbidden JIRA_USER does not false-positive on JIRA_USERNAME.
 func TestForbiddenCredentialEnvironmentNamesStayOutOfImplementation(t *testing.T) {
-	forbidden := []string{
-		"JIRA_" + "USERNAME",
-		"JIRA_" + "USER",
-		"JIRA_" + "PASSWORD",
-		"JIRA_" + "TOKEN",
+	forbidden := []*regexp.Regexp{
+		regexp.MustCompile(`\bJIRA_USER\b`),
+		regexp.MustCompile(`\bJIRA_TOKEN\b`),
 	}
 	skipDirs := map[string]bool{".git": true, ".agents": true, ".codex": true, ".harness-core": true}
 	err := filepath.WalkDir("../..", func(path string, d os.DirEntry, err error) error {
@@ -39,7 +43,7 @@ func TestForbiddenCredentialEnvironmentNamesStayOutOfImplementation(t *testing.T
 		}
 		text := string(b)
 		for _, name := range forbidden {
-			if strings.Contains(text, name) {
+			if name.MatchString(text) {
 				t.Fatalf("forbidden Jira credential env name %s found in %s", name, rel)
 			}
 		}

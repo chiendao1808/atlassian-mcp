@@ -136,7 +136,7 @@ The repository containing the `atlassian-mcp` source can be hosted on GitHub, Gi
 3. A module configuration error must not terminate another module.
 4. Startup must not make a network request to Jira or Bitbucket solely to decide whether tools are registered.
 5. Jira tools are registered when `JIRA_BASE_URL` and Jira TLS/CA configuration are statically valid.
-6. Jira network reachability and credentials are checked only by `jira_authenticate`.
+6. Jira network reachability and credentials are checked only by `jira_authenticate`'s logic. When `JIRA_USERNAME`/`JIRA_PASSWORD` are both already present in the environment, that logic also runs once automatically in the background right after startup (ADR-0005), without blocking the stdio transport or affecting tool registration; it is a no-op, with no network call, when either variable is absent.
 7. Bitbucket startup behavior remains consistent with the existing Bitbucket plan, except that a Bitbucket configuration failure is isolated to that module.
 8. Warnings go to `stderr`; `stdout` remains valid MCP protocol traffic only.
 
@@ -174,12 +174,17 @@ The exact Go interface is chosen during implementation, but the behaviors above 
 |---|---:|---|---|
 | `JIRA_BASE_URL` | Yes | none | Jira Server base URL including context path such as `/jira` |
 | `JIRA_CA_FILE` | No | system trust store | Jira-specific PEM CA file when verification is enabled |
+| `JIRA_USERNAME` | No | none | Fallback Basic Auth username read by `jira_authenticate` when the tool call omits `username` (ADR-0004) |
+| `JIRA_PASSWORD` | No | none | Fallback Basic Auth password read by `jira_authenticate` when the tool call omits `password` (ADR-0004) |
+
+`JIRA_USERNAME`/`JIRA_PASSWORD` do not enable the Jira module by themselves and do not
+bypass authentication -- they only supply the candidate credential that
+`jira_authenticate` still validates against `/rest/api/2/serverInfo` and
+`/rest/api/2/myself` before activating a session (Section 7).
 
 The following Jira credential variables must not exist in the implementation or installer contract:
 
-- `JIRA_USERNAME`
 - `JIRA_USER`
-- `JIRA_PASSWORD`
 - `JIRA_TOKEN`
 
 ### 4.3 Bitbucket variables
@@ -441,13 +446,19 @@ Input schema:
 
 | Property | Type | Required | Validation |
 |---|---|---:|---|
-| `username` | string | Yes | Non-empty after trim; preserve exact value for Basic Auth |
-| `password` | string | Yes | Non-empty; never trim or normalize password |
+| `username` | string | No -- falls back to `JIRA_USERNAME` (ADR-0004) | Non-empty after trim once resolved; preserve exact value for Basic Auth |
+| `password` | string | No -- falls back to `JIRA_PASSWORD` (ADR-0004) | Non-empty once resolved; never trim or normalize password |
+
+At least one source -- explicit tool input or the corresponding environment variable --
+must supply each of `username` and `password`; otherwise the call fails validation
+before any Jira request. Explicit tool input always takes precedence over the
+environment variable when both are present.
 
 The password property must be documented as sensitive. The MCP server cannot guarantee that a coding-agent client will not retain tool-call history; documentation must warn users to review client logging/history policy.
 
 ### 7.2 Authentication flow
 
+0. Resolve `username`/`password`: explicit tool input wins; for any field left empty, read the corresponding `JIRA_USERNAME`/`JIRA_PASSWORD` environment variable; if either remains empty, fail validation before any network call.
 1. Copy candidate username/password into an isolated candidate credential object.
 2. Call `GET {JIRA_BASE_URL}/rest/api/2/serverInfo` using the candidate Basic Auth credential.
 3. Validate that the response is Jira Server-compatible and retain sanitized version metadata.
@@ -470,6 +481,10 @@ The password property must be documented as sensitive. The MCP server cannot gua
 ### 7.4 Authentication gating
 
 When Jira static configuration is valid, all five Jira tools are registered from startup. Until authentication succeeds, every Jira business tool except `jira_authenticate` returns `JIRA_NOT_AUTHENTICATED` without sending a request to Jira.
+
+### 7.5 Automatic authentication on startup
+
+When `JIRA_USERNAME` and `JIRA_PASSWORD` are both present in the environment at startup, the server runs the same authentication flow from Section 7.2 once automatically, in the background, without an explicit `jira_authenticate` call (ADR-0005). This does not block the stdio transport from serving `initialize`, and does not affect whether tools are registered. A tool call that arrives before the background attempt finishes still returns `JIRA_NOT_AUTHENTICATED`. A failed automatic attempt is logged to `stderr` and otherwise has the same effect as a failed explicit `jira_authenticate` call: the previously active credential (if any) is preserved, and the module keeps returning `JIRA_NOT_AUTHENTICATED` until a successful authentication.
 
 ---
 

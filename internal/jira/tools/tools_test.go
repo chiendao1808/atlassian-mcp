@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,9 +14,18 @@ import (
 	"github.com/chiendao1808/atlassian-mcp/internal/observability"
 )
 
+func basicAuthValue(username, password string) string {
+	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+}
+
 func newTestService(baseURL string, hc *http.Client) *Service {
+	return newTestServiceWithEnv(baseURL, hc, nil)
+}
+
+func newTestServiceWithEnv(baseURL string, hc *http.Client, env map[string]string) *Service {
 	store := auth.NewSessionStore()
-	return NewService(client.New(baseURL, hc, 1<<20), store)
+	getenv := func(key string) string { return env[key] }
+	return NewService(client.New(baseURL, hc, 1<<20), store, getenv)
 }
 
 func TestGetIssueRejectsPathSeparatorWithoutNetwork(t *testing.T) {
@@ -92,6 +102,79 @@ func TestAuthenticateActivatesOnlyAfterServerInfoAndMyself(t *testing.T) {
 	}
 	if got := paths; len(got) != 2 || got[0] != "/rest/api/2/serverInfo" || got[1] != "/rest/api/2/myself" {
 		t.Fatalf("paths=%v", got)
+	}
+}
+
+func TestAuthenticateFallsBackToEnvironmentWhenInputOmitted(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/rest/api/2/serverInfo":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": "6.4.14"})
+		case "/rest/api/2/myself":
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "alice"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestServiceWithEnv(server.URL, server.Client(), map[string]string{
+		"JIRA_USERNAME": "alice",
+		"JIRA_PASSWORD": "secret",
+	})
+	out := svc.Authenticate(context.Background(), AuthenticateInput{})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	if want := "Basic " + basicAuthValue("alice", "secret"); gotAuth != want {
+		t.Fatalf("authorization=%q, want %q", gotAuth, want)
+	}
+}
+
+func TestAuthenticateExplicitInputOverridesEnvironment(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/rest/api/2/serverInfo":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": "6.4.14"})
+		case "/rest/api/2/myself":
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "bob"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestServiceWithEnv(server.URL, server.Client(), map[string]string{
+		"JIRA_USERNAME": "alice",
+		"JIRA_PASSWORD": "env-secret",
+	})
+	out := svc.Authenticate(context.Background(), AuthenticateInput{Username: "bob", Password: "input-secret"})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	if want := "Basic " + basicAuthValue("bob", "input-secret"); gotAuth != want {
+		t.Fatalf("authorization=%q, want %q", gotAuth, want)
+	}
+}
+
+func TestAuthenticateWithoutInputOrEnvironmentFailsValidation(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	out := svc.Authenticate(context.Background(), AuthenticateInput{})
+	if out.Success || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+		t.Fatalf("out=%+v", out)
+	}
+	if calls != 0 {
+		t.Fatalf("missing credentials sent %d requests", calls)
 	}
 }
 

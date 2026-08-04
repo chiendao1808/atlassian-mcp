@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Generate per-tool agent configs from the shared instruction bodies.
+
+Single source of truth: .agents/agent_instructions/<type>.md
+Outputs (do NOT edit by hand):
+  - .claude/agents/<type>.md   (YAML frontmatter + shared body)
+  - .codex/agents/<type>.toml  (metadata + developer_instructions = shared body)
+
+Usage:  python .agents/agent_instructions/generate_agents.py
+Run from the repository root.
+"""
+import re, os, sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SRC  = os.path.join(ROOT, ".agents", "agent_instructions")
+GEN  = ("GENERATED — source: .agents/agent_instructions/{n}.md · "
+        "regenerate: python .agents/agent_instructions/generate_agents.py")
+
+# ---- Manifest: per-agent metadata (shared body lives in the .md source) ------
+AGENTS = {
+    "req_analyzer": {
+        "description": "Classify a software request, analyze requirement or bug evidence, and review supplied implementation plans for reuse; returns a concise normalized brief before design, planning, or implementation.",
+        "claude": {"tools": "Read, Grep, Glob, Bash, WebSearch, WebFetch", "model": "sonnet"},
+        "codex":  {"model": "gpt-5.5", "reasoning": "medium", "sandbox": "read-only", "approval": "never",
+                    "extra": ['web_search = "live"', 'nickname_candidates = ["Analyst", "Scout", "Triage"]']},
+    },
+    "explorer": {
+        "description": "Read-only codebase exploration to locate files, symbols, dependencies, execution paths, and implementation evidence before planning or coding.",
+        "claude": {"tools": "Read, Grep, Glob, Bash", "model": "sonnet"},
+        "codex":  {"model": "gpt-5.5", "reasoning": "medium", "sandbox": "read-only", "approval": "never", "extra": []},
+    },
+    "designer": {
+        "description": "Evidence-based product, web, app, UI, UX, interaction, and design-system work grounded in project design skills, existing patterns, and verified references.",
+        "claude": {"tools": "Read, Grep, Glob, WebSearch, WebFetch", "model": "sonnet"},
+        "codex":  {"model": "gpt-5.5", "reasoning": "high", "sandbox": "read-only", "approval": "never",
+                    "extra": ['web_search = "live"', 'nickname_candidates = ["Canvas", "Muse", "Studio"]']},
+    },
+    "planner": {
+        "description": "Senior solution architect producing implementation and rollout plans grounded in verified requirements and the current codebase.",
+        "claude": {"tools": "Read, Grep, Glob, Bash", "model": "opus"},
+        "codex":  {"model": "gpt-5.6-sol", "reasoning": "high", "sandbox": "read-only", "approval": "never", "extra": []},
+    },
+    "implementer": {
+        "description": "Exclusive code-generation and code-mutation agent that implements approved scope with clean, tested, documented, commented, reviewable changes.",
+        "claude": {"tools": "Read, Grep, Glob, Edit, Write, Bash", "model": "sonnet"},
+        "codex":  {"model": "gpt-5.5", "reasoning": "high", "sandbox": "workspace-write", "approval": "on-request",
+                    "extra": ['approvals_reviewer = "user"']},
+    },
+    "code_reviewer": {
+        "description": "Senior read-only review of changed code and runtime-affecting artifacts, using plans, memory, and agent context only as scoped supporting evidence.",
+        "claude": {"tools": "Read, Grep, Glob, Bash", "model": "sonnet"},
+        "codex":  {"model": "gpt-5.6-terra", "reasoning": "high", "sandbox": "read-only", "approval": "never",
+                    "extra": ['nickname_candidates = ["Reviewer", "Sentinel", "Auditor"]'], "agents_disabled": True},
+    },
+}
+
+def load_body(name):
+    txt = open(os.path.join(SRC, f"{name}.md"), encoding="utf-8").read()
+    txt = re.sub(r'^\s*<!--.*?-->\s*', '', txt, flags=re.S)  # drop source banner
+    return txt.strip("\n")
+
+def write(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w", encoding="utf-8").write(content)
+
+def gen_claude(name, meta, body):
+    c = meta["claude"]
+    fm = (f"---\n# {GEN.format(n=name)}\n"
+          f"name: {name}\n"
+          f"description: {meta['description']}\n"
+          f"tools: {c['tools']}\n"
+          f"model: {c['model']}\n---\n\n")
+    write(os.path.join(ROOT, ".claude", "agents", f"{name}.md"), fm + body + "\n")
+
+def gen_codex(name, meta, body):
+    x = meta["codex"]
+    desc = meta["description"].replace('\\', '\\\\').replace('"', '\\"')
+    lines = [f"# {GEN.format(n=name)}",
+             f'name = "{name}"',
+             f'description = "{desc}"',
+             f'model = "{x["model"]}"',
+             f'model_reasoning_effort = "{x["reasoning"]}"',
+             f'sandbox_mode = "{x["sandbox"]}"',
+             f'approval_policy = "{x["approval"]}"']
+    lines += x.get("extra", [])
+    head = "\n".join(lines)
+    toml = f'{head}\n\ndeveloper_instructions = """\n{body}\n"""\n'
+    if x.get("agents_disabled"):
+        toml += '\n[agents]\nenabled = false\n'
+    write(os.path.join(ROOT, ".codex", "agents", f"{name}.toml"), toml)
+
+def main():
+    for name, meta in AGENTS.items():
+        body = load_body(name)
+        gen_claude(name, meta, body)
+        gen_codex(name, meta, body)
+        print(f"generated {name}: .claude/agents/{name}.md + .codex/agents/{name}.toml")
+
+if __name__ == "__main__":
+    main()

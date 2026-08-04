@@ -1,0 +1,462 @@
+schema_version: 1
+name: wf_code_review
+display_name: Code Review and Remediation
+description: Review an existing Git change set, triage findings, optionally remediate approved issues, verify changes, and
+  re-review.
+initial_state: REVIEW_INTAKE
+terminal_states:
+- COMPLETED
+- DEFERRED
+- CANCELLED
+runtime_state_template:
+  workflow_id: null
+  workflow_name: wf_code_review
+  status: running
+  current_state: REVIEW_INTAKE
+  previous_state: null
+  active_agent: req_analyzer
+  request:
+    summary: null
+    classification: code_review
+    source_refs: []
+    review_scope: null
+  review:
+    reviewed_files: []
+    primary_review_files: []
+    context_files_consulted: []
+    excluded_context_files: []
+    findings: []
+    accepted_findings: []
+    deferred_findings: []
+    rejected_findings: []
+  artifacts:
+    review_brief: null
+    supplied_remediation_plan: null
+    plan_review_report: null
+    review_report: null
+    evidence_report: null
+    remediation_plan: null
+    remediation_report: null
+    documentation_updates: []
+    comment_coverage: []
+    re_review_report: null
+  approval:
+    required: false
+    status: not_required
+    requested_scope: []
+    approved_scope: []
+  execution:
+    retry_count: 0
+    review_cycle: 0
+    max_review_cycles: 3
+    blocker: null
+  metadata:
+    raw_context:
+      user_prompt: null
+      source_snapshots: []
+      agent_outputs: []
+    additional_context:
+      user_clarifications: []
+      repository_rules: []
+      project_skills: []
+      constraints: []
+      notes: []
+      workflow_selection: {}
+    tags: []
+    correlation: {}
+    updated_at: null
+  history: []
+states:
+  REVIEW_INTAKE:
+    agent: req_analyzer
+    purpose: Clarify review scope and review any supplied remediation or implementation plan for reuse.
+    expected_outputs:
+    - review_brief
+    - normalized_review_scope
+    - blocking_questions
+    - supplied_plan_review
+    - plan_reuse_recommendation
+    allowed_events:
+    - review_scope_ready
+    - clarification_needed
+    - blocked
+    - cancelled
+    metadata:
+      raw_context_keys:
+      - user_prompt
+      - source_snapshots
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - workflow_selection
+  CLARIFICATION_REQUIRED:
+    agent: main
+    purpose: Obtain missing review scope, requirement, base revision, or expected behavior information.
+    expected_outputs:
+    - user_clarifications
+    allowed_events:
+    - clarification_received
+    - cancelled
+    metadata:
+      raw_context_keys:
+      - user_prompt
+      additional_context_keys:
+      - user_clarifications
+      - notes
+  DIFF_REVIEW:
+    agent: code_reviewer
+    purpose: Prioritize changed code and runtime-affecting artifacts, use plan or memory files only as scoped context, and return evidence-based actionable findings.
+    expected_outputs:
+    - review_report
+    - review_findings
+    - review_summary
+    - primary_review_files
+    - context_files_consulted
+    - excluded_context_files
+    - documentation_comment_findings
+    allowed_events:
+    - review_accepted
+    - findings_found
+    - uncertain_findings
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  EVIDENCE_VERIFICATION:
+    agent: explorer
+    purpose: Verify uncertain impact, side effects, callers, dependencies, contracts, or repository-specific behavior behind
+      review findings.
+    expected_outputs:
+    - evidence_report
+    - confirmed_findings
+    - rejected_findings
+    - unresolved_findings
+    allowed_events:
+    - evidence_ready
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  REVIEW_TRIAGE:
+    agent: main
+    purpose: Decide which findings are accepted, rejected, deferred, or require further planning.
+    expected_outputs:
+    - accepted_findings
+    - deferred_findings
+    - rejected_findings
+    - remediation_complexity
+    - supplied_plan_validation
+    allowed_events:
+    - all_findings_deferred
+    - complex_remediation
+    - direct_remediation
+    - cancelled
+    - provided_remediation_plan_ready
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - notes
+  REMEDIATION_PLANNING:
+    agent: planner
+    purpose: Create a remediation plan, or revise a reviewed supplied plan, for complex, cross-cutting, or scope-sensitive
+      accepted findings.
+    expected_outputs:
+    - remediation_plan
+    - requested_remediation_scope
+    - plan_questions
+    allowed_events:
+    - plan_ready
+    - clarification_needed
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  REMEDIATION_APPROVAL:
+    agent: main
+    purpose: Present accepted findings and the reused, revised, or new remediation scope for explicit user approval.
+    approval_required: true
+    expected_outputs:
+    - remediation_approval_status
+    - approved_scope
+    allowed_events:
+    - approved
+    - changes_requested
+    - rejected_or_deferred
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - notes
+  REMEDIATION:
+    agent: implementer
+    purpose: Fix only accepted findings within the approved remediation scope.
+    expected_outputs:
+    - remediated_findings
+    - changed_files
+    - remediation_report
+    - documentation_updates
+    - comment_coverage
+    allowed_events:
+    - remediation_ready
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  SELF_VERIFICATION:
+    agent: implementer
+    purpose: Review the remediation diff and run the narrowest appropriate compile or build validation.
+    expected_outputs:
+    - diff_summary
+    - verification_commands
+    - verification_result
+    - documentation_comment_check
+    allowed_events:
+    - verification_passed
+    - verification_failed
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - constraints
+      - notes
+  RE_REVIEW:
+    agent: code_reviewer
+    purpose: Re-review remediated code and runtime-affecting artifacts first, consulting plan or memory files only when directly relevant to accepted findings.
+    expected_outputs:
+    - re_review_report
+    - resolved_findings
+    - remaining_findings
+    - primary_review_files
+    - context_files_consulted
+    - excluded_context_files
+    - documentation_comment_findings
+    allowed_events:
+    - review_accepted
+    - findings_remain
+    - blocked
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - repository_rules
+      - project_skills
+      - constraints
+      - notes
+  BLOCKED:
+    agent: main
+    purpose: Resolve missing scope, evidence, tooling, approval, or write-boundary blockers.
+    expected_outputs:
+    - blocker_resolution
+    - resume_target
+    allowed_events:
+    - resume_intake
+    - resume_review
+    - resume_remediation
+    - cancelled
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - user_clarifications
+      - constraints
+      - notes
+  COMPLETED:
+    agent: main
+    purpose: Record the final review outcome, resolved findings, verification, and remaining risks.
+    terminal: true
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - constraints
+      - notes
+  DEFERRED:
+    agent: main
+    purpose: Record intentionally deferred findings, rationale, ownership, and follow-up references.
+    terminal: true
+    metadata:
+      raw_context_keys:
+      - agent_outputs
+      additional_context_keys:
+      - constraints
+      - notes
+  CANCELLED:
+    agent: main
+    purpose: Record cancellation without remediation.
+    terminal: true
+    metadata:
+      raw_context_keys: []
+      additional_context_keys:
+      - notes
+transitions:
+- from: REVIEW_INTAKE
+  event: clarification_needed
+  to: CLARIFICATION_REQUIRED
+  guard: review_scope_or_requirements_missing
+- from: CLARIFICATION_REQUIRED
+  event: clarification_received
+  to: REVIEW_INTAKE
+  guard: user_response_recorded_and_resume_state_is_review_intake
+- from: REVIEW_INTAKE
+  event: review_scope_ready
+  to: DIFF_REVIEW
+  guard: review_target_and_scope_defined
+- from: DIFF_REVIEW
+  event: uncertain_findings
+  to: EVIDENCE_VERIFICATION
+  guard: material_findings_require_additional_codebase_evidence
+- from: EVIDENCE_VERIFICATION
+  event: evidence_ready
+  to: DIFF_REVIEW
+  guard: finding_evidence_updated
+- from: DIFF_REVIEW
+  event: findings_found
+  to: REVIEW_TRIAGE
+  guard: actionable_findings_present
+- from: DIFF_REVIEW
+  event: review_accepted
+  to: COMPLETED
+  guard: no_actionable_findings_and_review_summary_present
+- from: REVIEW_TRIAGE
+  event: all_findings_deferred
+  to: DEFERRED
+  guard: no_accepted_findings
+- from: REVIEW_TRIAGE
+  event: complex_remediation
+  to: REMEDIATION_PLANNING
+  guard: accepted_findings_require_plan
+- from: REVIEW_TRIAGE
+  event: direct_remediation
+  to: REMEDIATION_APPROVAL
+  guard: accepted_findings_are_scoped_and_actionable
+- from: REVIEW_TRIAGE
+  event: provided_remediation_plan_ready
+  to: REMEDIATION_APPROVAL
+  guard: accepted_findings_are_covered_by_reviewed_supplied_remediation_plan
+- from: REMEDIATION_PLANNING
+  event: plan_ready
+  to: REMEDIATION_APPROVAL
+  guard: no_blocking_plan_questions
+- from: REMEDIATION_APPROVAL
+  event: changes_requested
+  to: REMEDIATION_PLANNING
+  guard: user_requested_plan_or_scope_changes
+- from: REMEDIATION_APPROVAL
+  event: approved
+  to: REMEDIATION
+  guard: explicit_user_approval_and_scope_recorded
+- from: REMEDIATION_APPROVAL
+  event: rejected_or_deferred
+  to: DEFERRED
+  guard: user_rejected_or_deferred_remediation
+- from: REMEDIATION
+  event: remediation_ready
+  to: SELF_VERIFICATION
+  guard: approved_remediation_applied_with_documentation_and_comment_coverage
+- from: SELF_VERIFICATION
+  event: verification_failed
+  to: REMEDIATION
+  guard: failure_within_approved_scope
+- from: SELF_VERIFICATION
+  event: verification_passed
+  to: RE_REVIEW
+  guard: diff_reviewed_compile_or_build_passed_and_documentation_comment_coverage_confirmed
+- from: RE_REVIEW
+  event: findings_remain
+  to: REMEDIATION
+  guard: accepted_or_new_blocking_findings_present_and_scope_valid
+- from: RE_REVIEW
+  event: review_accepted
+  to: COMPLETED
+  guard: accepted_findings_resolved_and_no_blocking_regressions
+- from: REVIEW_INTAKE
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: DIFF_REVIEW
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: EVIDENCE_VERIFICATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: REMEDIATION_PLANNING
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: REMEDIATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: SELF_VERIFICATION
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: RE_REVIEW
+  event: blocked
+  to: BLOCKED
+  guard: blocker_recorded
+- from: BLOCKED
+  event: resume_intake
+  to: REVIEW_INTAKE
+  guard: intake_blocker_resolved
+- from: BLOCKED
+  event: resume_review
+  to: DIFF_REVIEW
+  guard: review_blocker_resolved
+- from: BLOCKED
+  event: resume_remediation
+  to: REMEDIATION
+  guard: remediation_blocker_resolved_and_scope_approved
+- from: CLARIFICATION_REQUIRED
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled
+- from: REVIEW_INTAKE
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled
+- from: REVIEW_TRIAGE
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled
+- from: REMEDIATION_PLANNING
+  event: clarification_needed
+  to: CLARIFICATION_REQUIRED
+  guard: blocking_plan_questions_present_and_resume_state_recorded
+- from: CLARIFICATION_REQUIRED
+  event: clarification_received
+  to: REMEDIATION_PLANNING
+  guard: user_response_recorded_and_resume_state_is_remediation_planning
+- from: BLOCKED
+  event: cancelled
+  to: CANCELLED
+  guard: user_cancelled

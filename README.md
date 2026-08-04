@@ -78,21 +78,33 @@ scripts/install-from-remote.sh
 
 When `--agents claude`/`both` is combined with the default `--scope user` (or `--scope local`), the installer registers the server by shelling out to `claude mcp add` instead of writing a config file, so the `claude` CLI must already be installed and on `PATH`. Only `--scope project` writes a `.mcp.json` file directly.
 
+The installer generates a runtime wrapper (`atlassian-mcp-run`) that sets module config and resolves the Bitbucket token/Jira password from their indirection variable names at its own runtime, then execs the real binary. Claude Code and manual terminal runs use this wrapper, and it works regardless of whatever ambient environment the launching process has, since the wrapper resolves everything itself. **Codex is the one exception**: Codex's MCP launcher does not pass its own ambient environment through to spawned stdio servers, so it would never see the indirection variable the wrapper looks for. The installer therefore registers Codex directly against the built binary (not the wrapper) and writes an explicit `[mcp_servers.atlassian.env]` table into `config.toml` with the *resolved* values -- this is the one place this installer puts secret values (the Bitbucket token and, if `--jira-username` is set, the Jira password) directly into an agent config file, and only for Codex.
+
 ### Set required environment variables (Bash, user scope)
 
-The installer never accepts secrets as arguments; it reads the Bitbucket bearer token from the environment variable named by `--bitbucket-token-env` (default `BITBUCKET_BEARER_TOKEN`) only at wrapper runtime. Set it once for your user account so it survives new shells/terminals, then export it in the current shell before running the installer:
+The installer never accepts secrets as arguments directly on the command line; it reads them through env var name *indirection* only while resolving installer configuration:
+
+- The Bitbucket bearer token, from the variable named by `--bitbucket-token-env` (default `BITBUCKET_BEARER_TOKEN`).
+- The Jira password, from the variable named by `--jira-password-env` (default `JIRA_PASSWORD`, only resolved when `--jira-username` is set).
+
+Set them once for your user account so they survive new shells/terminals, then export them in the current shell before running the installer:
 
 ```bash
 # Persist for the user account: append to the shell profile loaded on login
 echo "export BITBUCKET_BEARER_TOKEN='<your-bitbucket-token>'" >> "$HOME/.bashrc"   # bash
+echo "export JIRA_PASSWORD='<your-jira-password>'" >> "$HOME/.bashrc"
 # echo "export BITBUCKET_BEARER_TOKEN='<your-bitbucket-token>'" >> "$HOME/.profile"  # sh/other login shells
+# echo "export JIRA_PASSWORD='<your-jira-password>'" >> "$HOME/.profile"
 
-# Load it into the current shell (or open a new terminal)
+# Load them into the current shell (or open a new terminal)
 source "$HOME/.bashrc"
 
-# Confirm it is visible to the process the installer will run in
+# Confirm they are visible to the process the installer will run in
 echo "$BITBUCKET_BEARER_TOKEN"
+echo "$JIRA_PASSWORD"
 ```
+
+Skip the Jira line entirely if you do not want `jira_authenticate` to have a credential fallback (see [ADR-0004](docs/decisions/0004-jira-credential-env-fallback.md)) or automatic startup authentication (see [ADR-0005](docs/decisions/0005-jira-auto-authenticate-on-startup.md)) -- omitting `--jira-username` from the install command below leaves that feature off.
 
 Fetch it from the canonical GitHub raw URL. Use a release tag or full commit SHA for `INSTALLER_REF` in production:
 
@@ -112,6 +124,8 @@ curl -fsSL "$INSTALLER_URL" |
     --enable-jira \
     --jira-base-url https://jira.internal.example.com/jira \
     --jira-ca-file /etc/ssl/certs/jira-internal-ca.pem \
+    --jira-username svc-atlassian-mcp \
+    --jira-password-env JIRA_PASSWORD \
     --enable-bitbucket \
     --bitbucket-base-url https://bitbucket.internal.example.com \
     --bitbucket-project-key ABC \
@@ -142,16 +156,18 @@ Do not put credentials in the raw URL or `--source-repo-url`. Use SSH, a Git cre
 | `--agents` | Yes, unless run interactively | `both` (`claude`\|`codex`\|`both`\|`none`) | prompted on a TTY; error with `--non-interactive` | Selects which coding agent to register: Codex TOML, Claude, both, or none. For `--scope local`/`user`, Claude is registered by invoking the `claude` CLI (`claude mcp add`) instead of writing a config file; the `claude` CLI must be on `PATH`. |
 | `--scope` | No | `user` (`local`\|`project`\|`user`) | `user` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `--project-dir`). For Claude: `local`/`user` register via the `claude` CLI; `project` writes `--project-dir/.mcp.json`. |
 | `--project-dir` | No | `/home/me/projects/atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `--scope` is `local`/`project`. |
-| `--enable-jira` | No (flag; at least one of `--enable-jira`/`--enable-bitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper. |
+| `--enable-jira` | No (flag; at least one of `--enable-jira`/`--enable-bitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper (and, for Codex, into `config.toml`). |
 | `--jira-base-url` | Yes, if `--enable-jira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
 | `--jira-ca-file` | No | `/etc/ssl/certs/jira-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Jira server's TLS certificate. |
-| `--enable-bitbucket` | No (flag; at least one of `--enable-jira`/`--enable-bitbucket` is required) | — | disabled | Enables the Bitbucket module and writes its base URL/project key/token indirection into the wrapper. |
+| `--jira-username` | No (requires `--enable-jira`) | `svc-atlassian-mcp` | *(empty)* | Jira username resolved into `JIRA_USERNAME`, letting `jira_authenticate` fall back to it ([ADR-0004](docs/decisions/0004-jira-credential-env-fallback.md)) and enabling automatic startup authentication when the password is also present ([ADR-0005](docs/decisions/0005-jira-auto-authenticate-on-startup.md)). Omit entirely to leave both features off. |
+| `--jira-password-env` | No | `JIRA_PASSWORD` | `JIRA_PASSWORD` | Name of the environment variable the wrapper reads the Jira password from at runtime when `--jira-username` is set; for Codex, the resolved value is written into `config.toml` instead (see the note above). |
+| `--enable-bitbucket` | No (flag; at least one of `--enable-jira`/`--enable-bitbucket` is required) | — | disabled | Enables the Bitbucket module and writes its base URL/project key/token indirection into the wrapper (and, for Codex, the resolved values into `config.toml`). |
 | `--bitbucket-base-url` | Yes, if `--enable-bitbucket` | `https://bitbucket.internal.example.com` | *(empty)* | Base URL of the Bitbucket instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
 | `--bitbucket-project-key` | Yes, if `--enable-bitbucket` | `ABC` | *(empty)* | Bitbucket project key that scopes the repository/pull-request tools. |
 | `--bitbucket-user-slug` | No | `jane.doe` | *(empty)* | Bitbucket user slug used where tools need to identify the acting user. |
-| `--bitbucket-token-env` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the wrapper reads the Bitbucket bearer token from at runtime; the token value itself is never written to config. |
+| `--bitbucket-token-env` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the wrapper reads the Bitbucket bearer token from at runtime; for Codex, the resolved value is also written into `config.toml` (never into Claude's config either way). |
 | `--bitbucket-ca-file` | No | `/etc/ssl/certs/bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
-| `--atlassian-tls-verify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper enables TLS certificate verification for Jira/Bitbucket requests. |
+| `--atlassian-tls-verify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper (and, for Codex, `config.toml`) enables TLS certificate verification for Jira/Bitbucket requests. |
 | `--skip-tests` | No (flag) | — | disabled (`go test ./...` runs before build) | Skips running the repository test suite before building the binary from source. |
 | `--dry-run` | No (flag) | — | disabled | Validates all arguments and exits without cloning, building, installing, or writing any config. |
 | `--replace` | No (flag) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `--scope project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `--scope local`/`user`, which register through the `claude` CLI and are idempotent by design. |

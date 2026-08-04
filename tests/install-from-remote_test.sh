@@ -251,12 +251,15 @@ test_service_base_urls_reject_embedded_credentials() {
 
 test_module_validation_and_non_secret_config() {
   export BITBUCKET_SECRET_ENV='super-secret-token'
+  export JIRA_SECRET_ENV='super-secret-password'
   run_installer both \
     --binary "$REPO_ROOT/go.mod" \
     --skip-tests \
     --agents both \
     --enable-jira \
     --jira-base-url https://jira.internal.example.com/jira \
+    --jira-username jira-svc \
+    --jira-password-env JIRA_SECRET_ENV \
     --enable-bitbucket \
     --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
     --bitbucket-project-key PRJ \
@@ -264,15 +267,29 @@ test_module_validation_and_non_secret_config() {
     --bitbucket-token-env BITBUCKET_SECRET_ENV \
     --atlassian-tls-verify true
   local dir="$TMP_ROOT/both"
+  # The wrapper (used for Claude/manual runs) only ever holds the indirection variable *names*,
+  # resolving actual secret values at its own runtime -- never the resolved values themselves.
   assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-token"
-  assert_not_contains "$dir/install/atlassian-mcp-run" "JIRA_USERNAME"
-  assert_not_contains "$dir/install/atlassian-mcp-run" "JIRA_PASSWORD"
-  assert_contains "$dir/project/.codex/config.toml" "command = \"$dir/install/atlassian-mcp-run\""
-  assert_contains "$dir/project/.mcp.json" "\"command\": \"$dir/install/atlassian-mcp-run\""
+  assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-password"
+  assert_contains "$dir/install/atlassian-mcp-run" "JIRA_USERNAME"
+  assert_contains "$dir/install/atlassian-mcp-run" "\${JIRA_SECRET_ENV}"
+  assert_contains "$dir/install/atlassian-mcp-run" "\${BITBUCKET_SECRET_ENV}"
+  # Codex does not inherit ambient environment for spawned stdio servers, so its config carries the
+  # binary directly plus the resolved values (this is the one deliberate exception to the
+  # no-secrets-in-agent-config rule, documented in codex_env_lines).
+  assert_contains "$dir/project/.codex/config.toml" "command = \"$dir/install/atlassian-mcp\""
+  assert_contains "$dir/project/.codex/config.toml" '[mcp_servers.atlassian.env]'
+  assert_contains "$dir/project/.codex/config.toml" 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
+  assert_contains "$dir/project/.codex/config.toml" 'JIRA_USERNAME = "jira-svc"'
+  assert_contains "$dir/project/.codex/config.toml" 'JIRA_PASSWORD = "super-secret-password"'
   assert_not_contains "$dir/project/.codex/config.toml" "BITBUCKET_SECRET_ENV"
+  assert_not_contains "$dir/project/.codex/config.toml" "JIRA_SECRET_ENV"
+  # Claude's config is untouched by any of this and must stay completely secret-free.
+  assert_contains "$dir/project/.mcp.json" "\"command\": \"$dir/install/atlassian-mcp-run\""
   assert_not_contains "$dir/project/.mcp.json" "BITBUCKET_SECRET_ENV"
-  assert_not_contains "$dir/project/.codex/config.toml" "super-secret-token"
+  assert_not_contains "$dir/project/.mcp.json" "JIRA_SECRET_ENV"
   assert_not_contains "$dir/project/.mcp.json" "super-secret-token"
+  assert_not_contains "$dir/project/.mcp.json" "super-secret-password"
 
   local missing="$TMP_ROOT/missing"
   mkdir -p "$missing/home" "$missing/install" "$missing/project"
@@ -312,6 +329,49 @@ test_non_interactive_bitbucket_requires_token_env_value() {
   assert_contains /tmp/installer-missing-token.out "UNSET_BITBUCKET_TOKEN is required"
 }
 
+test_jira_username_requires_enable_jira_and_password_env() {
+  local no_jira="$TMP_ROOT/jira-username-without-enable"
+  mkdir -p "$no_jira/home" "$no_jira/install" "$no_jira/project"
+  make_fakes "$no_jira/bin"
+  export BITBUCKET_SECRET_ENV='token'
+  if FAKE_LOG="$no_jira/commands.log" HOME="$no_jira/home" PATH="$no_jira/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$no_jira/install" \
+      --project-dir "$no_jira/project" \
+      --scope project \
+      --agents none \
+      --enable-bitbucket \
+      --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
+      --bitbucket-project-key PRJ \
+      --bitbucket-token-env BITBUCKET_SECRET_ENV \
+      --jira-username jira-svc \
+      --non-interactive >/tmp/installer-jira-username-no-enable.out 2>&1; then
+    fail "--jira-username without --enable-jira unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-jira-username-no-enable.out "--jira-username requires --enable-jira"
+
+  local missing_password="$TMP_ROOT/jira-username-missing-password"
+  mkdir -p "$missing_password/home" "$missing_password/install" "$missing_password/project"
+  make_fakes "$missing_password/bin"
+  unset UNSET_JIRA_PASSWORD
+  if FAKE_LOG="$missing_password/commands.log" HOME="$missing_password/home" PATH="$missing_password/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$missing_password/install" \
+      --project-dir "$missing_password/project" \
+      --scope project \
+      --agents none \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --jira-username jira-svc \
+      --jira-password-env UNSET_JIRA_PASSWORD \
+      --non-interactive >/tmp/installer-jira-missing-password.out 2>&1; then
+    fail "missing Jira password env was not rejected"
+  fi
+  assert_contains /tmp/installer-jira-missing-password.out "UNSET_JIRA_PASSWORD is required"
+}
+
 test_agent_config_escapes_wrapper_path_for_toml_and_json() {
   local dir="$TMP_ROOT/config-escaping"
   local install_dir="$dir/install \"quote\" \\slash"
@@ -327,7 +387,7 @@ test_agent_config_escapes_wrapper_path_for_toml_and_json() {
       --enable-jira \
       --jira-base-url https://jira.internal.example.com/jira \
       --non-interactive >/tmp/installer-config-escaping.out 2>&1
-  assert_contains "$dir/project/.codex/config.toml" 'install \"quote\" \\slash/atlassian-mcp-run'
+  assert_contains "$dir/project/.codex/config.toml" 'install \"quote\" \\slash/atlassian-mcp"'
   assert_contains "$dir/project/.mcp.json" 'install \"quote\" \\slash/atlassian-mcp-run'
 }
 
@@ -454,6 +514,7 @@ for test_name in \
   test_service_base_urls_reject_embedded_credentials \
   test_module_validation_and_non_secret_config \
   test_non_interactive_bitbucket_requires_token_env_value \
+  test_jira_username_requires_enable_jira_and_password_env \
   test_agent_config_escapes_wrapper_path_for_toml_and_json \
   test_piped_installer_without_agents_fails_without_terminal \
   test_claude_cli_registers_scope_local_and_user \

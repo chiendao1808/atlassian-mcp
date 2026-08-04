@@ -36,6 +36,8 @@ Common options:
   --enable-jira
   --jira-base-url URL                  required with --enable-jira
   --jira-ca-file FILE_PATH
+  --jira-username NAME                 optional; requires --enable-jira
+  --jira-password-env VARIABLE_NAME    default: JIRA_PASSWORD
   --enable-bitbucket
   --bitbucket-base-url URL             required with --enable-bitbucket
   --bitbucket-project-key KEY          required with --enable-bitbucket
@@ -90,9 +92,11 @@ reject_embedded_credentials() {
   esac
 }
 
-# Ensures the token environment indirection can be embedded safely in the generated wrapper.
+# Ensures a token/password environment indirection name can be embedded safely and looked up.
 validate_token_env_name() {
-  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--bitbucket-token-env must be a shell variable name"
+  local flag_name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "$flag_name must be a shell variable name"
 }
 
 # Reads the agent target only from the controlling terminal so piped installer source is never consumed as user input.
@@ -177,6 +181,15 @@ write_wrapper() {
     echo "export ATLASSIAN_TLS_VERIFY=$(shell_quote "$atlassian_tls_verify")"
     [[ "$enable_jira" == "yes" ]] && echo "export JIRA_BASE_URL=$(shell_quote "$jira_base_url")"
     [[ -n "$jira_ca_file" ]] && echo "export JIRA_CA_FILE=$(shell_quote "$jira_ca_file")"
+    if [[ -n "$jira_username" ]]; then
+      echo "export JIRA_USERNAME=$(shell_quote "$jira_username")"
+      # The password stays in the caller's environment; the wrapper only maps the configured variable name.
+      echo "if [[ -z \"\${${jira_password_env}:-}\" ]]; then"
+      echo "  echo \"JIRA password environment variable ${jira_password_env} is not set\" >&2"
+      echo "  exit 1"
+      echo "fi"
+      echo "export JIRA_PASSWORD=\"\${${jira_password_env}}\""
+    fi
     if [[ "$enable_bitbucket" == "yes" ]]; then
       echo "export BITBUCKET_BASE_URL=$(shell_quote "$bitbucket_base_url")"
       echo "export BITBUCKET_PROJECT_KEY=$(shell_quote "$bitbucket_project_key")"
@@ -195,7 +208,36 @@ write_wrapper() {
   rm -f "$content"
 }
 
-# Replaces only the installer-managed Codex block, preserving unrelated TOML around it.
+# Produces the [mcp_servers.atlassian.env] lines Codex needs. Codex's MCP launcher does not pass its
+# own ambient environment through to spawned stdio servers (confirmed from Codex's own logs: the
+# binary started with every module disabled even with the wrapper script, which itself resolves
+# BITBUCKET_TOKEN_ENV-style indirection only from whatever environment the spawning process gives
+# it -- Codex gives it none). Callers must have already validated that a resolved bitbucket/jira
+# secret is available before calling this; see the top-level validation block.
+codex_env_lines() {
+  echo "ATLASSIAN_TLS_VERIFY = \"$(toml_string "$atlassian_tls_verify")\""
+  if [[ "$enable_jira" == "yes" ]]; then
+    echo "JIRA_BASE_URL = \"$(toml_string "$jira_base_url")\""
+  fi
+  [[ -n "$jira_ca_file" ]] && echo "JIRA_CA_FILE = \"$(toml_string "$jira_ca_file")\""
+  if [[ -n "$jira_username" ]]; then
+    echo "JIRA_USERNAME = \"$(toml_string "$jira_username")\""
+    echo "JIRA_PASSWORD = \"$(toml_string "${!jira_password_env}")\""
+  fi
+  if [[ "$enable_bitbucket" == "yes" ]]; then
+    echo "BITBUCKET_BASE_URL = \"$(toml_string "$bitbucket_base_url")\""
+    echo "BITBUCKET_PROJECT_KEY = \"$(toml_string "$bitbucket_project_key")\""
+    [[ -n "$bitbucket_user_slug" ]] && echo "BITBUCKET_USER_SLUG = \"$(toml_string "$bitbucket_user_slug")\""
+    [[ -n "$bitbucket_ca_file" ]] && echo "BITBUCKET_CA_FILE = \"$(toml_string "$bitbucket_ca_file")\""
+    echo "BITBUCKET_BEARER_TOKEN = \"$(toml_string "${!bitbucket_token_env}")\""
+  fi
+}
+
+# Replaces only the installer-managed Codex block, preserving unrelated TOML around it. Command is
+# always the built binary, not the wrapper -- see codex_env_lines for why Codex needs resolved
+# values written directly into its config instead of relying on the wrapper's runtime indirection.
+# This does put the Bitbucket token and, if configured, the Jira password in Codex's config file,
+# unlike Claude's; that is a deliberate, Codex-specific exception, not a general policy change.
 managed_codex_config() {
   local path="$1"
   local command="$2"
@@ -209,6 +251,13 @@ managed_codex_config() {
     echo "# BEGIN ${MARKER}"
     echo "[mcp_servers.atlassian]"
     echo "command = \"$(toml_string "$command")\""
+    echo "args = []"
+    local env_lines
+    env_lines="$(codex_env_lines)"
+    if [[ -n "$env_lines" ]]; then
+      echo "[mcp_servers.atlassian.env]"
+      printf '%s\n' "$env_lines"
+    fi
     echo "# END ${MARKER}"
   } >"${body}.next"
   echo "${body}.next"
@@ -275,14 +324,18 @@ config_paths() {
 }
 
 # Configures the selected agent files idempotently; caller performs rollback on any failure.
+# command is the wrapper (used for Claude/manual runs); binary is the installed executable, used
+# directly for Codex since its config carries resolved env values instead of relying on the
+# wrapper's runtime indirection lookup (see codex_env_lines).
 configure_agents() {
   local command="$1"
+  local binary="$2"
   local codex_content
   local claude_content
   config_paths
   case "$agents" in
     codex|both)
-      codex_content="$(managed_codex_config "$codex_config" "$command")" || return 1
+      codex_content="$(managed_codex_config "$codex_config" "$binary")" || return 1
       write_file_atomically "$codex_content" "$codex_config" yes || return 1
       rm -f "$codex_content"
       ;;
@@ -353,6 +406,8 @@ project_dir="$(pwd)"
 enable_jira="no"
 jira_base_url=""
 jira_ca_file=""
+jira_username=""
+jira_password_env="JIRA_PASSWORD"
 enable_bitbucket="no"
 bitbucket_base_url=""
 bitbucket_project_key=""
@@ -379,6 +434,8 @@ while [[ $# -gt 0 ]]; do
     --enable-jira) enable_jira="yes"; shift ;;
     --jira-base-url) jira_base_url="${2:-}"; shift 2 ;;
     --jira-ca-file) jira_ca_file="${2:-}"; shift 2 ;;
+    --jira-username) jira_username="${2:-}"; shift 2 ;;
+    --jira-password-env) jira_password_env="${2:-}"; shift 2 ;;
     --enable-bitbucket) enable_bitbucket="yes"; shift ;;
     --bitbucket-base-url) bitbucket_base_url="${2:-}"; shift 2 ;;
     --bitbucket-project-key) bitbucket_project_key="${2:-}"; shift 2 ;;
@@ -413,12 +470,22 @@ if [[ "$enable_jira" == "yes" ]]; then
   [[ -n "$jira_base_url" ]] || die "--jira-base-url is required with --enable-jira"
   require_url "--jira-base-url" "$jira_base_url"
 fi
+if [[ -n "$jira_username" ]]; then
+  [[ "$enable_jira" == "yes" ]] || die "--jira-username requires --enable-jira"
+  validate_token_env_name "--jira-password-env" "$jira_password_env"
+  [[ "$non_interactive" != "yes" || -n "${!jira_password_env:-}" ]] || die "$jira_password_env is required for non-interactive installs when --jira-username is set"
+  # Codex's config carries the resolved password directly (see codex_env_lines), unlike the wrapper
+  # used for Claude/manual runs, which resolves --jira-password-env only at its own runtime -- so
+  # Codex needs it available now regardless of --non-interactive.
+  [[ "$agents" != "codex" && "$agents" != "both" || -n "${!jira_password_env:-}" ]] || die "$jira_password_env is required to configure Codex when --jira-username is set"
+fi
 if [[ "$enable_bitbucket" == "yes" ]]; then
   [[ -n "$bitbucket_base_url" ]] || die "--bitbucket-base-url is required with --enable-bitbucket"
   [[ -n "$bitbucket_project_key" ]] || die "--bitbucket-project-key is required with --enable-bitbucket"
   require_url "--bitbucket-base-url" "$bitbucket_base_url"
-  validate_token_env_name "$bitbucket_token_env"
+  validate_token_env_name "--bitbucket-token-env" "$bitbucket_token_env"
   [[ "$non_interactive" != "yes" || -n "${!bitbucket_token_env:-}" ]] || die "$bitbucket_token_env is required for non-interactive Bitbucket installs"
+  [[ "$agents" != "codex" && "$agents" != "both" || -n "${!bitbucket_token_env:-}" ]] || die "$bitbucket_token_env is required to configure Codex"
 fi
 
 if [[ "$dry_run" == "yes" ]]; then
@@ -439,7 +506,7 @@ atomic_copy "$built_binary" "$installed_binary"
 write_wrapper "$wrapper" "$installed_binary"
 
 if [[ "$agents" != "none" ]]; then
-  if ! configure_agents "$wrapper"; then
+  if ! configure_agents "$wrapper" "$installed_binary"; then
     rollback_configs
     die "failed to configure selected agents"
   fi

@@ -17,6 +17,25 @@ func Definitions() []*mcp.Tool {
 		{Name: "jira_add_issue_comment", Description: "Add a Jira issue comment. Requires jira_authenticate first and may require client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
 		{Name: "jira_update_issue_fields", Description: "Update Jira issue fields using native Jira fields/update JSON. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
 		{Name: "jira_transition_issue", Description: "Transition a Jira issue by ID or exact name. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_create_issue", Description: "Create a new Jira issue from native fields/update JSON. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_bulk_create_issues", Description: "Create multiple Jira issues in one call; per-row failures are reported in the response and do not fail the tool. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_delete_issue", Description: "Permanently delete a Jira issue, optionally including its subtasks. Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_assign_issue", Description: "Assign or unassign a Jira issue; an empty or omitted name unassigns it. Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_search_issues", Description: "Search Jira issues by JQL. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}},
+		{Name: "jira_list_issue_comments", Description: "List a Jira issue's comments with optional pagination, ordering, and expand. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}},
+		{Name: "jira_update_issue_comment", Description: "Update one Jira comment's body and optional visibility. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_delete_issue_comment", Description: "Permanently delete one Jira comment. Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_list_issue_transitions", Description: "List a Jira issue's available workflow transitions, defaulting expand to transitions.fields. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}},
+		{Name: "jira_add_issue_attachment", Description: "Upload a base64-encoded file attachment to a Jira issue. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_delete_issue_attachment", Description: "Permanently delete one Jira attachment by attachment ID (no issue key in this path). Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_list_issue_worklogs", Description: "List a Jira issue's worklog entries. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}},
+		{Name: "jira_add_issue_worklog", Description: "Add a worklog entry (time spent) to a Jira issue, optionally adjusting the remaining estimate. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_get_issue_watchers", Description: "List a Jira issue's watchers. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}},
+		{Name: "jira_add_issue_watcher", Description: "Add a user as a watcher on a Jira issue. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_remove_issue_watcher", Description: "Remove a user as a watcher from a Jira issue. Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_vote_issue", Description: "Add the authenticated user's vote to a Jira issue. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_unvote_issue", Description: "Remove the authenticated user's vote from a Jira issue. Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
+		{Name: "jira_create_issue_link", Description: "Create a native Jira issue link between two issues. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
 	}
 }
 
@@ -39,5 +58,62 @@ func (s *Service) Register(server *mcp.Server) {
 	})
 	mcp.AddTool(server, defs[4], func(ctx context.Context, req *mcp.CallToolRequest, input TransitionIssueInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.TransitionIssue(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[5], func(ctx context.Context, req *mcp.CallToolRequest, input CreateIssueInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.CreateIssue(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[6], func(ctx context.Context, req *mcp.CallToolRequest, input BulkCreateIssuesInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.BulkCreateIssues(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[7], func(ctx context.Context, req *mcp.CallToolRequest, input DeleteIssueInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.DeleteIssue(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[8], func(ctx context.Context, req *mcp.CallToolRequest, input AssignIssueInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.AssignIssue(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[9], func(ctx context.Context, req *mcp.CallToolRequest, input SearchIssuesInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.SearchIssues(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[10], func(ctx context.Context, req *mcp.CallToolRequest, input ListIssueCommentsInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.ListIssueComments(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[11], func(ctx context.Context, req *mcp.CallToolRequest, input UpdateIssueCommentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.UpdateIssueComment(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[12], func(ctx context.Context, req *mcp.CallToolRequest, input DeleteIssueCommentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.DeleteIssueComment(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[13], func(ctx context.Context, req *mcp.CallToolRequest, input ListIssueTransitionsInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.ListIssueTransitions(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[14], func(ctx context.Context, req *mcp.CallToolRequest, input AddIssueAttachmentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.AddIssueAttachment(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[15], func(ctx context.Context, req *mcp.CallToolRequest, input DeleteIssueAttachmentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.DeleteIssueAttachment(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[16], func(ctx context.Context, req *mcp.CallToolRequest, input ListIssueWorklogsInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.ListIssueWorklogs(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[17], func(ctx context.Context, req *mcp.CallToolRequest, input AddIssueWorklogInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.AddIssueWorklog(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[18], func(ctx context.Context, req *mcp.CallToolRequest, input GetIssueWatchersInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.GetIssueWatchers(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[19], func(ctx context.Context, req *mcp.CallToolRequest, input AddIssueWatcherInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.AddIssueWatcher(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[20], func(ctx context.Context, req *mcp.CallToolRequest, input RemoveIssueWatcherInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.RemoveIssueWatcher(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[21], func(ctx context.Context, req *mcp.CallToolRequest, input VoteIssueInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.VoteIssue(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[22], func(ctx context.Context, req *mcp.CallToolRequest, input UnvoteIssueInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.UnvoteIssue(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[23], func(ctx context.Context, req *mcp.CallToolRequest, input CreateIssueLinkInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.CreateIssueLink(ctx, input), nil
 	})
 }

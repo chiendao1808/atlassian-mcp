@@ -166,9 +166,11 @@ scripts/install-from-remote.ps1
 
 When `-Agents Claude`/`Both` is combined with the default `-Scope User` (or `-Scope Local`), the installer registers the server by shelling out to `claude mcp add` instead of writing a config file, so the `claude` CLI must already be installed and on `PATH`. Only `-Scope Project` writes a `.mcp.json` file directly.
 
+There is no wrapper script. The installer registers `atlassian-mcp.exe` directly with Claude/Codex and persists all non-secret module config, plus the resolved Bitbucket token, as Windows **User** environment variables (`ATLASSIAN_TLS_VERIFY`, `JIRA_BASE_URL`, `JIRA_CA_FILE`, `BITBUCKET_BASE_URL`, `BITBUCKET_PROJECT_KEY`, `BITBUCKET_USER_SLUG`, `BITBUCKET_CA_FILE`, `BITBUCKET_BEARER_TOKEN`) so the binary can read them directly at startup. **Restart Claude Code, Codex, and any open terminal** after installing/reinstalling — Windows only hands newly persisted User environment variables to processes started *after* the change, not to ones already running.
+
 ### Set required environment variables (PowerShell, user scope)
 
-The installer never accepts secrets as arguments; it reads the Bitbucket bearer token from the environment variable named by `-BitbucketTokenEnv` (default `BITBUCKET_BEARER_TOKEN`) only at wrapper runtime. Persist it in the Windows per-user environment store so it survives new PowerShell/terminal sessions, then reload the current session before running the installer:
+The installer never accepts secrets as arguments; it reads the Bitbucket bearer token from the environment variable named by `-BitbucketTokenEnv` (default `BITBUCKET_BEARER_TOKEN`) only while persisting installer configuration, and writes the resolved value to the `BITBUCKET_BEARER_TOKEN` User environment variable so the binary can read it directly. Persist the indirection variable in the Windows per-user environment store so it survives new PowerShell/terminal sessions, then reload the current session before running the installer:
 
 ```powershell
 # Persist for the user account (Windows User environment store)
@@ -227,20 +229,20 @@ PowerShell 7 users may replace `powershell.exe` with `pwsh`. Do not put credenti
 | `-SourceRef` | No | `v1.0.0` | `main` | Git ref (branch, tag, or commit) checked out after cloning. |
 | `-SourceCloneDepth` | No | `1` | `1` | Depth passed to `git clone`/`git fetch` for the source checkout. |
 | `-KeepSource` | No (switch) | — | disabled (source is cleaned up after a successful install) | Keeps the temporary cloned checkout on disk after install, for debugging. |
-| `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the built/provided binary and the generated wrapper script are installed into. |
+| `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the built/provided binary (`atlassian-mcp.exe`) is installed into. There is no wrapper script; Claude/Codex are registered to run this exe directly. |
 | `-Agents` | Yes, unless run interactively | `Both` (`Claude`\|`Codex`\|`Both`\|`None`) | prompted on a TTY; error with `-NonInteractive` | Selects which coding agent to register: Codex TOML, Claude, both, or none. For `-Scope Local`/`User`, Claude is registered by invoking the `claude` CLI (`claude mcp add`) instead of writing a config file; the `claude` CLI must be on `PATH`. |
 | `-Scope` | No | `User` (`Local`\|`Project`\|`User`) | `User` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `-ProjectDir`). For Claude: `Local`/`User` register via the `claude` CLI; `Project` writes `-ProjectDir\.mcp.json`. |
 | `-ProjectDir` | No | `C:\Users\me\projects\atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `-Scope` is `Local`/`Project`. |
-| `-EnableJira` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper. |
+| `-EnableJira` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Jira module and persists `JIRA_BASE_URL`/`JIRA_CA_FILE` as User environment variables. |
 | `-JiraBaseUrl` | Yes, if `-EnableJira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
 | `-JiraCaFile` | No | `C:\certs\jira-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Jira server's TLS certificate. |
-| `-EnableBitbucket` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Bitbucket module and writes its base URL/project key/token indirection into the wrapper. |
+| `-EnableBitbucket` | No (switch; at least one of `-EnableJira`/`-EnableBitbucket` is required) | — | disabled | Enables the Bitbucket module and persists its base URL/project key/resolved token as User environment variables. |
 | `-BitbucketBaseUrl` | Yes, if `-EnableBitbucket` | `https://bitbucket.internal.example.com` | *(empty)* | Base URL of the Bitbucket instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
 | `-BitbucketProjectKey` | Yes, if `-EnableBitbucket` | `ABC` | *(empty)* | Bitbucket project key that scopes the repository/pull-request tools. |
 | `-BitbucketUserSlug` | No | `jane.doe` | *(empty)* | Bitbucket user slug used where tools need to identify the acting user. |
-| `-BitbucketTokenEnv` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the wrapper reads the Bitbucket bearer token from at runtime; the token value itself is never written to config. |
+| `-BitbucketTokenEnv` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the installer reads the Bitbucket bearer token from at install time; the resolved value is then persisted to the `BITBUCKET_BEARER_TOKEN` User environment variable, never written to Claude/Codex config. |
 | `-BitbucketCaFile` | No | `C:\certs\bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
-| `-AtlassianTlsVerify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper enables TLS certificate verification for Jira/Bitbucket requests. |
+| `-AtlassianTlsVerify` | No | `false` (`true`\|`false`) | `false` | Persisted as the `ATLASSIAN_TLS_VERIFY` User environment variable, controlling TLS certificate verification for Jira/Bitbucket requests. |
 | `-SkipTests` | No (switch) | — | disabled (`go test ./...` runs before build) | Skips running the repository test suite before building the binary from source. |
 | `-DryRun` | No (switch) | — | disabled | Validates all arguments and exits without cloning, building, installing, or writing any config. |
 | `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `-Scope Project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `-Scope Local`/`User`, which register through the `claude` CLI and are idempotent by design. |

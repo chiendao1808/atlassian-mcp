@@ -56,11 +56,6 @@ function Invoke-Checked($Command, [string[]]$Arguments) {
     }
 }
 
-# Escapes a value for generated PowerShell single-quoted literals in the wrapper.
-function Escape-PowerShellLiteral($Value) {
-    return ([string]$Value).Replace("'", "''")
-}
-
 # Escapes paths for Codex TOML basic strings.
 function Escape-TomlString($Value) {
     return ([string]$Value).Replace('\', '\\').Replace('"', '\"')
@@ -71,7 +66,7 @@ function Escape-JsonString($Value) {
     return ([string]$Value).Replace('\', '\\').Replace('"', '\"')
 }
 
-# Validates non-secret service URLs before writing them into wrapper environment.
+# Validates non-secret service URLs before persisting them as environment variables.
 function Require-ServiceUrl($Name, $Value) {
     if ($Value -notmatch '^https?://') {
         Die "$Name must be an http or https URL"
@@ -92,7 +87,7 @@ function Reject-EmbeddedSourceCredentials($Value) {
     }
 }
 
-# Ensures the Bitbucket token indirection can be safely referenced by the wrapper.
+# Ensures the Bitbucket token indirection variable name is safe to look up and reference.
 function Validate-TokenEnvName($Value) {
     if ($Value -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
         Die '-BitbucketTokenEnv must be an environment variable name'
@@ -119,7 +114,7 @@ function Get-HomeDir {
     Die 'HOME or USERPROFILE is required'
 }
 
-# Applies a restrictive ACL to newly created wrapper/config files when Windows exposes icacls.
+# Applies a restrictive ACL to newly created agent config files when Windows exposes icacls.
 function Grant-CurrentUserModify($Path) {
     if (-not (Get-Command icacls -ErrorAction SilentlyContinue)) {
         return
@@ -131,7 +126,7 @@ function Grant-CurrentUserModify($Path) {
     & icacls $Path '/grant:r' "${user}:(M)" | Out-Null
 }
 
-# Applies a restrictive ACL to newly created wrapper/config files when Windows exposes icacls.
+# Applies a restrictive ACL to newly created agent config files when Windows exposes icacls.
 function Protect-NewFileAcl($Path, [bool]$WasCreated) {
     if (-not $WasCreated) {
         return
@@ -229,41 +224,75 @@ function Write-FileAtomically($Content, $To, [bool]$Backup) {
     Protect-NewFileAcl $To $created
 }
 
-# Generates the PowerShell wrapper; token values are read only when the wrapper starts.
-function Write-Wrapper($Wrapper, $BinaryPath) {
-    $lines = @(
-        'Set-StrictMode -Version 2.0',
-        '$ErrorActionPreference = ''Stop''',
-        ('$env:ATLASSIAN_TLS_VERIFY = ''{0}''' -f (Escape-PowerShellLiteral $AtlassianTlsVerify.ToLowerInvariant()))
-    )
-    if ($EnableJira) {
-        $lines += '$env:JIRA_BASE_URL = ''{0}''' -f (Escape-PowerShellLiteral $JiraBaseUrl)
+# Broadcasts WM_SETTINGCHANGE so processes that cache their own environment snapshot (notably
+# explorer.exe, which supplies the starting environment for anything launched from the Start Menu
+# or a desktop shortcut) refresh it immediately. [Environment]::SetEnvironmentVariable(...,'User')
+# only updates the registry; without this broadcast, apps launched via Explorer after this install
+# can still inherit Explorer's stale environment snapshot until the next logon, even though a
+# terminal opened directly (cmd.exe, powershell.exe) already reads the registry fresh on its own.
+function Broadcast-EnvironmentChange {
+    if (-not ('AtlassianMcpInstaller.NativeMethods' -as [type])) {
+        Add-Type -Namespace AtlassianMcpInstaller -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
     }
-    if (-not [string]::IsNullOrEmpty($JiraCaFile)) {
-        $lines += '$env:JIRA_CA_FILE = ''{0}''' -f (Escape-PowerShellLiteral $JiraCaFile)
-    }
-    if ($EnableBitbucket) {
-        $lines += '$env:BITBUCKET_BASE_URL = ''{0}''' -f (Escape-PowerShellLiteral $BitbucketBaseUrl)
-        $lines += '$env:BITBUCKET_PROJECT_KEY = ''{0}''' -f (Escape-PowerShellLiteral $BitbucketProjectKey)
-        if (-not [string]::IsNullOrEmpty($BitbucketUserSlug)) {
-            $lines += '$env:BITBUCKET_USER_SLUG = ''{0}''' -f (Escape-PowerShellLiteral $BitbucketUserSlug)
-        }
-        if (-not [string]::IsNullOrEmpty($BitbucketCaFile)) {
-            $lines += '$env:BITBUCKET_CA_FILE = ''{0}''' -f (Escape-PowerShellLiteral $BitbucketCaFile)
-        }
-        # The secret remains in the launch environment; config stores only the variable name indirection.
-        $lines += '$bitbucketToken = [Environment]::GetEnvironmentVariable(''{0}'')' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
-        $lines += 'if ([string]::IsNullOrEmpty($bitbucketToken)) {{ $bitbucketToken = [Environment]::GetEnvironmentVariable(''{0}'', ''User'') }}' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
-        $lines += 'if ([string]::IsNullOrEmpty($bitbucketToken)) {{ Write-Error ''BITBUCKET token environment variable {0} is not set''; exit 1 }}' -f (Escape-PowerShellLiteral $BitbucketTokenEnv)
-        $lines += '$env:BITBUCKET_BEARER_TOKEN = $bitbucketToken'
-    }
-    $lines += '& ''{0}'' @args' -f (Escape-PowerShellLiteral $BinaryPath)
-    $lines += 'exit $LASTEXITCODE'
-    Write-FileAtomically ($lines -join [Environment]::NewLine) $Wrapper $false
+    $result = [UIntPtr]::Zero
+    [void][AtlassianMcpInstaller.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$result)
 }
 
-# Produces Codex TOML with only the installer-managed block replaced.
-function New-CodexConfig($Path, $Command) {
+# Resolves the module config, plus the Bitbucket token, into the fixed environment variable names
+# the binary reads (internal/config, internal/jira, internal/bitbucket). Single source of truth for
+# both Set-PersistedConfigEnv (Windows User env, for ambient-inheriting hosts and manual terminal use)
+# and Codex's per-server [mcp_servers.atlassian.env] table (Codex's own MCP child-process launcher does
+# not inherit the parent's ambient environment, confirmed via Codex's own logs showing the binary
+# starting with every module disabled even after a full restart and an environment-change broadcast;
+# Codex requires env vars declared explicitly per server, exactly like its own node_repl entry does).
+function Get-ResolvedConfigEnv {
+    $envVars = [ordered]@{ ATLASSIAN_TLS_VERIFY = $AtlassianTlsVerify.ToLowerInvariant() }
+    if ($EnableJira) {
+        $envVars['JIRA_BASE_URL'] = $JiraBaseUrl
+    }
+    if (-not [string]::IsNullOrEmpty($JiraCaFile)) {
+        $envVars['JIRA_CA_FILE'] = $JiraCaFile
+    }
+    if ($EnableBitbucket) {
+        $envVars['BITBUCKET_BASE_URL'] = $BitbucketBaseUrl
+        $envVars['BITBUCKET_PROJECT_KEY'] = $BitbucketProjectKey
+        if (-not [string]::IsNullOrEmpty($BitbucketUserSlug)) {
+            $envVars['BITBUCKET_USER_SLUG'] = $BitbucketUserSlug
+        }
+        if (-not [string]::IsNullOrEmpty($BitbucketCaFile)) {
+            $envVars['BITBUCKET_CA_FILE'] = $BitbucketCaFile
+        }
+        $bitbucketToken = Get-EnvValue $BitbucketTokenEnv
+        if ([string]::IsNullOrEmpty($bitbucketToken)) {
+            Die "BITBUCKET token environment variable $BitbucketTokenEnv is not set"
+        }
+        $envVars['BITBUCKET_BEARER_TOKEN'] = $bitbucketToken
+    }
+    return $envVars
+}
+
+# Persists the resolved config as User environment variables so hosts that do inherit ambient
+# environment (confirmed for Claude Code) and manual terminal runs of the binary pick it up.
+# Processes already running at install time will not see these until restarted; Broadcast-
+# EnvironmentChange only refreshes processes launched afterward (e.g. via Explorer), not ones
+# already running.
+function Set-PersistedConfigEnv($EnvVars) {
+    foreach ($key in $EnvVars.Keys) {
+        [Environment]::SetEnvironmentVariable($key, $EnvVars[$key], 'User')
+    }
+    Broadcast-EnvironmentChange
+}
+
+# Produces Codex TOML with only the installer-managed block replaced. EnvVars is written as an
+# explicit [mcp_servers.atlassian.env] table -- required because Codex's MCP launcher does not
+# pass its own ambient environment through to spawned stdio servers (see Get-ResolvedConfigEnv).
+# This does put the Bitbucket token in Codex's config file, unlike the Claude Code path; that is a
+# deliberate, Codex-specific exception forced by Codex's launcher, not a general policy change. The
+# file keeps the same current-user-only ACL as the persisted User environment variable it mirrors.
+function New-CodexConfig($Path, $Command, $EnvVars) {
     $body = @()
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $skip = $false
@@ -283,8 +312,14 @@ function New-CodexConfig($Path, $Command) {
     }
     $body += "# BEGIN $Marker"
     $body += '[mcp_servers.atlassian]'
-    $body += 'command = "powershell.exe"'
-    $body += 'args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "{0}"]' -f (Escape-TomlString $Command)
+    $body += 'command = "{0}"' -f (Escape-TomlString $Command)
+    $body += 'args = []'
+    if ($EnvVars.Count -gt 0) {
+        $body += '[mcp_servers.atlassian.env]'
+        foreach ($key in $EnvVars.Keys) {
+            $body += '{0} = "{1}"' -f $key, (Escape-TomlString $EnvVars[$key])
+        }
+    }
     $body += "# END $Marker"
     return ($body -join [Environment]::NewLine)
 }
@@ -368,10 +403,10 @@ function Get-ConfigPaths {
 }
 
 # Configures selected agent files idempotently; caller rolls back any partial failure.
-function Configure-Agents($Command) {
+function Configure-Agents($Command, $EnvVars) {
     $paths = Get-ConfigPaths
     if ($Agents -eq 'Codex' -or $Agents -eq 'Both') {
-        Write-FileAtomically (New-CodexConfig $paths.Codex $Command) $paths.Codex $true
+        Write-FileAtomically (New-CodexConfig $paths.Codex $Command $EnvVars) $paths.Codex $true
     }
     if ($Agents -eq 'Claude' -or $Agents -eq 'Both') {
         if ($Scope -eq 'Project') {
@@ -483,13 +518,13 @@ try {
     }
 
     $installedBinary = Join-Path $InstallDir 'atlassian-mcp.exe'
-    $wrapper = Join-Path $InstallDir 'atlassian-mcp-run.ps1'
     Copy-Atomically $builtBinary $installedBinary
-    Write-Wrapper $wrapper $installedBinary
+    $envVars = Get-ResolvedConfigEnv
+    Set-PersistedConfigEnv $envVars
 
     if ($Agents -ne 'None') {
         try {
-            Configure-Agents $wrapper
+            Configure-Agents $installedBinary $envVars
             Cleanup-Backups
         } catch {
             Rollback-Configs
@@ -498,6 +533,7 @@ try {
     }
 
     Write-Host "installed atlassian-mcp to $installedBinary"
+    Write-Host 'restart Claude Code, Codex, or your terminal session to pick up the newly persisted environment variables'
     $Script:InstallSucceeded = $true
     Cleanup-Source
 } finally {

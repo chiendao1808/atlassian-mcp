@@ -65,6 +65,9 @@ func Definitions() []*mcp.Tool {
 
 func (s *Service) Register(server *mcp.Server) {
 	defs := Definitions()
+	for _, def := range defs {
+		def.OutputSchema = result.MustOutputSchema()
+	}
 	s.registerBranchTools(server, defs)
 	s.registerCommitTools(server, defs)
 	s.registerPullRequestTools(server, defs)

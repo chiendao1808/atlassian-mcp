@@ -7,6 +7,29 @@ $Installer = Join-Path $RepoRoot 'scripts\install-from-remote.ps1'
 $PowerShellExe = (Get-Command powershell.exe).Source
 $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-ps-installer-tests-{0}" -f ([guid]::NewGuid().ToString('N')))
 
+# The installer persists these under the real Windows 'User' scope (HKCU\Environment), not under any
+# per-test $env:HOME override, so the whole suite snapshots and restores them to avoid leaving test
+# values behind on the machine running these tests.
+$PersistedEnvKeys = @(
+    'ATLASSIAN_TLS_VERIFY', 'JIRA_BASE_URL', 'JIRA_CA_FILE',
+    'BITBUCKET_BASE_URL', 'BITBUCKET_PROJECT_KEY', 'BITBUCKET_USER_SLUG',
+    'BITBUCKET_CA_FILE', 'BITBUCKET_BEARER_TOKEN'
+)
+
+function Save-PersistedEnv {
+    $snapshot = @{}
+    foreach ($key in $PersistedEnvKeys) {
+        $snapshot[$key] = [Environment]::GetEnvironmentVariable($key, 'User')
+    }
+    $snapshot
+}
+
+function Restore-PersistedEnv($Snapshot) {
+    foreach ($key in $PersistedEnvKeys) {
+        [Environment]::SetEnvironmentVariable($key, $Snapshot[$key], 'User')
+    }
+}
+
 # Minimal test harness: every test runs the real installer with fake external tools and asserts observable output.
 function Fail($Message) {
     throw "FAIL: $Message"
@@ -213,7 +236,6 @@ function Test-HttpsRemotesCheckoutTestBuildAndInstallAtomically {
         Assert-Contains $result.Log 'go test ./...'
         Assert-Contains $result.Log 'go build -o'
         Assert-File (Join-Path $result.CaseDir 'install\atlassian-mcp.exe')
-        Assert-File (Join-Path $result.CaseDir 'install\atlassian-mcp-run.ps1')
         Assert-PathMissing (Get-ClonedSourceDir $result.Log)
         if ($result.Output -notmatch 'cleaned cloned source') {
             Fail "remote install did not report source cleanup: $($result.Output)"
@@ -282,20 +304,41 @@ function Test-ModuleValidationAndNonSecretConfig {
         '-AtlassianTlsVerify', 'true'
     ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token' }
 
-    $wrapper = Join-Path $result.CaseDir 'install\atlassian-mcp-run.ps1'
     $codex = Join-Path $result.CaseDir 'project\.codex\config.toml'
     $claude = Join-Path $result.CaseDir 'project\.mcp.json'
-    Assert-NotContains $wrapper 'super-secret-token'
-    Assert-NotContains $wrapper 'JIRA_USERNAME'
-    Assert-NotContains $wrapper 'JIRA_PASSWORD'
-    Assert-Contains $wrapper 'BITBUCKET_SECRET_ENV'
+    # Codex's MCP launcher does not inherit ambient environment (see Get-ResolvedConfigEnv), so the
+    # resolved, non-indirected values are expected in its config -- unlike Claude's, which is not
+    # touched here and must stay secret-free.
     Assert-NotContains $codex 'BITBUCKET_SECRET_ENV'
     Assert-NotContains $claude 'BITBUCKET_SECRET_ENV'
-    Assert-NotContains $codex 'super-secret-token'
+    Assert-Contains $codex '[mcp_servers.atlassian.env]'
+    Assert-Contains $codex 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
     Assert-NotContains $claude 'super-secret-token'
-    Assert-Contains $codex 'command = "powershell.exe"'
-    Assert-Contains $codex 'args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",'
-    Assert-Contains $wrapper "GetEnvironmentVariable('BITBUCKET_SECRET_ENV', 'User')"
+    Assert-Contains $codex 'args = []'
+    if ((Get-Content -LiteralPath $codex -Raw).IndexOf('powershell.exe', [System.StringComparison]::Ordinal) -ge 0) {
+        Fail "codex config should invoke the binary directly, not powershell.exe: $codex"
+    }
+    Assert-Contains $codex 'atlassian-mcp.exe'
+    Assert-Contains $claude 'atlassian-mcp.exe'
+
+    if ([Environment]::GetEnvironmentVariable('ATLASSIAN_TLS_VERIFY', 'User') -ne 'true') {
+        Fail 'ATLASSIAN_TLS_VERIFY was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('JIRA_BASE_URL', 'User') -ne 'https://jira.internal.example.com/jira') {
+        Fail 'JIRA_BASE_URL was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('BITBUCKET_BASE_URL', 'User') -ne 'https://bitbucket.internal.example.com/bitbucket') {
+        Fail 'BITBUCKET_BASE_URL was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('BITBUCKET_PROJECT_KEY', 'User') -ne 'PRJ') {
+        Fail 'BITBUCKET_PROJECT_KEY was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('BITBUCKET_USER_SLUG', 'User') -ne 'svc-atlassian-mcp') {
+        Fail 'BITBUCKET_USER_SLUG was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', 'User') -ne 'super-secret-token') {
+        Fail 'BITBUCKET_BEARER_TOKEN was not resolved from BITBUCKET_SECRET_ENV and persisted'
+    }
 
     $missing = Invoke-InstallerCase 'missing-project-key' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
@@ -324,7 +367,7 @@ function Test-NonInteractiveBitbucketRequiresTokenEnvValue {
     }
 }
 
-function Test-AgentConfigEscapesWrapperPathForTomlAndJson {
+function Test-AgentConfigEscapesBinaryPathForTomlAndJson {
     $caseDir = Join-Path $TmpRoot 'config-escaping'
     $installDir = Join-Path $caseDir 'install space\slash'
     New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), $installDir, (Join-Path $caseDir 'project'), (Join-Path $caseDir 'bin') | Out-Null
@@ -365,9 +408,9 @@ function Test-AgentConfigEscapesWrapperPathForTomlAndJson {
         $env:PATHEXT = $oldPathext
     }
 
-    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'command = "powershell.exe"'
-    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'install space\\slash\\atlassian-mcp-run.ps1'
-    Assert-Contains (Join-Path $caseDir 'project\.mcp.json') 'install space\\slash\\atlassian-mcp-run.ps1'
+    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'args = []'
+    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'install space\\slash\\atlassian-mcp.exe'
+    Assert-Contains (Join-Path $caseDir 'project\.mcp.json') 'install space\\slash\\atlassian-mcp.exe'
 }
 
 function Test-ClaudeCliRegistersScopeLocalAndUser {
@@ -557,6 +600,7 @@ function Test-FinalPathsAndReadmeBootstrapContract {
     Assert-NotContains (Join-Path $RepoRoot 'README.md') 'Invoke-Expression'
 }
 
+$PersistedEnvSnapshot = Save-PersistedEnv
 try {
     New-Item -ItemType Directory -Force -Path $TmpRoot | Out-Null
     $tests = @(
@@ -566,7 +610,7 @@ try {
         'Test-EmbeddedCredentialsAreRejectedBeforeGit',
         'Test-ModuleValidationAndNonSecretConfig',
         'Test-NonInteractiveBitbucketRequiresTokenEnvValue',
-        'Test-AgentConfigEscapesWrapperPathForTomlAndJson',
+        'Test-AgentConfigEscapesBinaryPathForTomlAndJson',
         'Test-ClaudeCliRegistersScopeLocalAndUser',
         'Test-ClaudeCliMissingBinaryErrorsClearly',
         'Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls',
@@ -579,5 +623,6 @@ try {
     }
     Write-Host 'PASS install-from-remote.Tests.ps1'
 } finally {
+    Restore-PersistedEnv $PersistedEnvSnapshot
     Remove-Item -LiteralPath $TmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

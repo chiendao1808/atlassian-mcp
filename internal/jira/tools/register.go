@@ -22,6 +22,9 @@ func Definitions() []*mcp.Tool {
 
 func (s *Service) Register(server *mcp.Server) {
 	defs := Definitions()
+	for _, def := range defs {
+		def.OutputSchema = result.MustOutputSchema()
+	}
 	mcp.AddTool(server, defs[0], func(ctx context.Context, req *mcp.CallToolRequest, input AuthenticateInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.Authenticate(ctx, input), nil
 	})

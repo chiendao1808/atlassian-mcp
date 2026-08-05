@@ -2,7 +2,7 @@
 
 ## 1. Authority and use
 
-This guide is the endpoint-level implementation contract for all 26 Bitbucket MCP tools. It supplements the task plan; when a task summary is less specific, this guide controls. It is pinned to Bitbucket Server 5.10.2.
+This guide is the endpoint-level implementation contract for all 27 Bitbucket MCP tools. It supplements the task plan; when a task summary is less specific, this guide controls. It is pinned to Bitbucket Server 5.10.2.
 
 Source order:
 
@@ -520,6 +520,25 @@ An implementation agent must stop and record a specification question rather tha
 - **Required tests:** Expected/auto version; declined success; not-declined; stale; 401/404/409; one POST; destructive annotation.
 - **Test layers:** unit validation/serialization; request-recording HTTP contract; MCP schema/annotation snapshot; real Bitbucket 5.10.2 host where this section declares a staging gate.
 
+<a id="tool-bitbucket_update_pull_request"></a>
+### 3.27 `bitbucket_update_pull_request`
+
+- **MCP purpose:** Update an open pull request's title, description, and reviewers using optimistic locking with auto-preserved omitted fields.
+- **Source:** [bundled exact-resource anchor](../references/jira-6.4.14_bitbucket-5.10.2-rest-api-reference.md#bb-api-update-pull-request); [official Bitbucket Server 5.10.2 REST](https://docs.atlassian.com/bitbucket-server/rest/5.10.2/bitbucket-rest.html), resource heading `PUT /rest/api/1.0/projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}`.
+- **Method/path:** `PUT /rest/api/1.0/projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}`.
+- **Query/path inputs:** None. Required resolved `version` is sourced from one immediate GET; callers never pass a version.
+- **Request headers:** `Authorization: Bearer …`; `Content-Type: application/json`; `Accept: application/json`.
+- **Request body:** JSON `{version, title, description, reviewers}`. `version` is always the value read from the pre-PUT GET; if that GET yields no `version`, the tool fails validation before issuing any PUT. Any of `title`/`description`/`reviewers` the caller omits is preserved from the GET; a supplied value overrides. A supplied empty `reviewers` array clears all reviewers; an omitted `reviewers` preserves the current reviewer set — but the preserved reviewers are **normalized** to `{"user":{"name": identity}}` (read-only fields such as `slug`, `displayName`, `role`, `approved`, `lastReviewedCommit` are stripped), never echoed as the full GET participant object. If a participant's `user.name` cannot be read as a usable non-empty string (missing, wrong type, or empty), that reviewer is **not dropped**: its original `user` sub-object is preserved verbatim as a fallback so the "reviewers untouched" path never silently removes a reviewer. An entry is skipped entirely only when it is not a participant object at all (not an object, or with no `user` key).
+- **Expected success:** 200 JSON updated pull request with a bumped `version`.
+- **Response preservation:** Preserve the updated PR object, its new `version`, title, description, reviewers, and state metadata returned upstream.
+- **Permission concept:** PR author or equivalent write permission on the repository.
+- **Error mapping / stop conditions:** A 409 means a stale version or concurrent edit; surface it via the shared HTTP-error path with upstream detail and never replay the PUT. A failed pre-PUT GET is returned unchanged and no PUT is issued.
+- **Retry behavior:** No blind retry. Exactly one GET followed by at most one PUT; on 409 the caller re-reads and decides.
+- **Response-size / truncation:** Apply the shared bounded-reader policy. Do not silently truncate a JSON object; return the shared response-too-large error when a complete bounded representation cannot be produced.
+- **MCP annotations:** `readOnlyHint=false; destructiveHint=false; idempotentHint=false`; mutation tools require client approval under the project policy.
+- **Required tests:** Auto-preserve omitted title/description/reviewers with normalization of preserved reviewers to `{"user":{"name":...}}`; explicit empty reviewers clears all; version taken from GET (missing version fails validation, no PUT issued); failed GET propagates with no PUT; 409 surfaced without retry; exactly one PUT; additive annotation.
+- **Test layers:** unit validation/serialization; request-recording HTTP contract; MCP schema/annotation snapshot; real Bitbucket 5.10.2 host where this section declares a staging gate.
+
 ## 4. Mandatory real-host compatibility gates
 
 Before release against the internal Bitbucket Server 5.10.2 host, record sanitized request/response fixtures for:
@@ -534,7 +553,7 @@ Before release against the internal Bitbucket Server 5.10.2 host, record sanitiz
 
 ## 5. Completion scan
 
-- Exactly 26 tool sections exist.
+- Exactly 27 tool sections exist.
 - Every section includes method/path, parameters, headers, body, success, response, permission, errors, retry, truncation, annotations, and tests.
 - Every local source link resolves to a stable anchor.
 - No endpoint field or enum exists only because an implementation agent inferred it.

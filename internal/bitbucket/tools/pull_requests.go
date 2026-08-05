@@ -98,6 +98,21 @@ type transitionInput struct {
 	Precheck        *bool  `json:"precheck,omitempty"`
 }
 
+// updatePRInput updates an existing pull request's editable metadata using
+// auto-preserve semantics. Any pointer field left nil is preserved from the
+// current PR (fetched via one GET immediately before the PUT); a non-nil field
+// overrides. Reviewers is a pointer-to-slice so a nil pointer ("leave reviewers
+// untouched") is distinguishable from a non-nil empty slice ("clear all
+// reviewers"). The optimistic-locking version is never supplied by the caller —
+// it is always read fresh from the pre-PUT GET.
+type updatePRInput struct {
+	RepositorySlug string           `json:"repositorySlug"`
+	PullRequestID  int              `json:"pullRequestId"`
+	Title          *string          `json:"title,omitempty"`
+	Description    *string          `json:"description,omitempty"`
+	Reviewers      *[]reviewerInput `json:"reviewers,omitempty"`
+}
+
 func (s *Service) ListPullRequests(ctx context.Context, in prListInput) result.Envelope {
 	return s.getJSON(ctx, "bitbucket_list_pull_requests", in.RepositorySlug, "pull-requests", q(
 		"state", in.State, "direction", in.Direction, "at", in.At, "order", in.Order, "participant", in.Participant,
@@ -221,6 +236,100 @@ func (s *Service) getPR(ctx context.Context, tool, slug string, id int, key stri
 		return fail(tool, "pullRequestId is required")
 	}
 	return s.getJSON(ctx, tool, slug, prPath(id), nil, key)
+}
+
+// UpdatePullRequest edits an existing PR's title, description, and reviewers.
+// It auto-fetches the current PR first (mirroring transition()'s auto-fetch
+// idiom) so the optimistic-locking version and any omitted fields are sourced
+// fresh rather than trusted from the caller, then issues a single JSON-body
+// PUT. On a 409 (stale version / concurrent edit) it surfaces the conflict via
+// the shared clientError/FailHTTPDetail path and never retries.
+func (s *Service) UpdatePullRequest(ctx context.Context, in updatePRInput) result.Envelope {
+	tool := "bitbucket_update_pull_request"
+	// Auto-fetch the current PR: getPR guards pullRequestId<=0 and (via
+	// endpoint) repositorySlug, and gives us the fresh version plus the current
+	// title/description/reviewers to preserve. Propagate a failed GET verbatim,
+	// exactly like transition() does (pull_requests.go:203-206).
+	env := s.getPR(ctx, tool, in.RepositorySlug, in.PullRequestID, "pullRequest")
+	if !env.Success {
+		return env
+	}
+	pr := env.Data.(map[string]any)["pullRequest"].(map[string]any)
+
+	body := map[string]any{}
+	// version is always sourced fresh from the GET (never caller-supplied).
+	raw, ok := pr["version"].(float64)
+	if !ok {
+		return fail(tool, "current PR version could not be read")
+	}
+	body["version"] = int(raw)
+	// title: caller override, else preserve current.
+	if in.Title != nil {
+		body["title"] = *in.Title
+	} else if v, ok := pr["title"]; ok {
+		body["title"] = v
+	}
+	// description: caller override, else preserve current when present.
+	if in.Description != nil {
+		body["description"] = *in.Description
+	} else if v, ok := pr["description"]; ok {
+		body["description"] = v
+	}
+	// reviewers: caller override (non-nil, incl. empty slice = clear all), else
+	// preserve the current reviewer set, normalized to the write shape
+	// ({"user":{"name":...}}) rather than echoed as the full GET participant
+	// object (which also carries role/approved/lastReviewedCommit and is not
+	// guaranteed accepted on write).
+	if in.Reviewers != nil {
+		body["reviewers"] = *in.Reviewers
+	} else {
+		body["reviewers"] = normalizeReviewers(pr["reviewers"])
+	}
+
+	return s.putJSON(ctx, tool, in.RepositorySlug, prPath(in.PullRequestID), nil, body, "pullRequest")
+}
+
+// normalizeReviewers reduces GET's full participant objects
+// ({"user":{"name":...},"role":"REVIEWER","approved":...,...}) to the minimal
+// write shape Bitbucket's PUT expects ({"user":{"name":...}}), dropping
+// read-only fields the write endpoint does not accept. It always returns a
+// non-nil (possibly empty) slice so callers can serialize an explicit
+// "reviewers": [] rather than a missing key.
+//
+// This function is only invoked on the "caller omitted reviewers" path in
+// UpdatePullRequest, where the intent is to leave the current reviewer set
+// untouched. If a participant's user.name can't be read as a usable
+// non-empty string (missing, wrong type, or empty), the entry is NOT dropped:
+// its original "user" sub-object is preserved verbatim instead, whatever
+// shape it has. Dropping it would silently remove that reviewer as a side
+// effect of an update that never intended to touch reviewers at all. An
+// entry is skipped entirely only when it isn't a participant object in the
+// first place — i.e. not a map[string]any, or with no "user" key at all —
+// because there is nothing to preserve in that case.
+func normalizeReviewers(raw any) []map[string]any {
+	list, _ := raw.([]any)
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		participant, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		userRaw, hasUser := participant["user"]
+		if !hasUser {
+			continue
+		}
+		if user, ok := userRaw.(map[string]any); ok {
+			if name, ok := user["name"].(string); ok && name != "" {
+				out = append(out, map[string]any{"user": map[string]any{"name": name}})
+				continue
+			}
+		}
+		// Fallback-preserve: keep the reviewer with its original user
+		// sub-object rather than dropping it, since name normalization
+		// failed but this path must never silently remove reviewers.
+		out = append(out, map[string]any{"user": userRaw})
+	}
+	return out
 }
 
 func prPath(id int, parts ...string) string {

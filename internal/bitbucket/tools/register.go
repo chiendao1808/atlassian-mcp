@@ -48,6 +48,7 @@ func Definitions() []*mcp.Tool {
 		{"bitbucket_merge_pull_request", "Merge one Bitbucket pull request with version safety.", false, &destructive},
 		{"bitbucket_decline_pull_request", "Decline one Bitbucket pull request with version safety.", false, &destructive},
 		{"bitbucket_reopen_pull_request", "Reopen one Bitbucket pull request with version safety.", false, &destructive},
+		{"bitbucket_update_pull_request", "Update one Bitbucket pull request's title, description, and reviewers; omitted fields are preserved and the version is resolved automatically.", false, &additive},
 	}
 	defs := make([]*mcp.Tool, 0, len(names))
 	for _, item := range names {
@@ -157,5 +158,8 @@ func (s *Service) registerPullRequestTools(server *mcp.Server, defs []*mcp.Tool)
 	})
 	mcp.AddTool(server, defs[25], func(ctx context.Context, req *mcp.CallToolRequest, input transitionInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.ReopenPullRequest(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[26], func(ctx context.Context, req *mcp.CallToolRequest, input updatePRInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.UpdatePullRequest(ctx, input), nil
 	})
 }

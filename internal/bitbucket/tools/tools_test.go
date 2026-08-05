@@ -44,6 +44,7 @@ func TestDefinitionsExposeExactlyTheBitbucketToolSet(t *testing.T) {
 		"bitbucket_merge_pull_request",
 		"bitbucket_decline_pull_request",
 		"bitbucket_reopen_pull_request",
+		"bitbucket_update_pull_request",
 	}
 	defs := Definitions()
 	var got []string
@@ -58,6 +59,9 @@ func TestDefinitionsExposeExactlyTheBitbucketToolSet(t *testing.T) {
 	}
 	if !defs[0].Annotations.ReadOnlyHint || defs[3].Annotations.ReadOnlyHint || defs[12].Annotations.DestructiveHint == nil || !*defs[12].Annotations.DestructiveHint {
 		t.Fatalf("unexpected annotations")
+	}
+	if defs[26].Annotations.DestructiveHint == nil || *defs[26].Annotations.DestructiveHint {
+		t.Fatalf("bitbucket_update_pull_request should be additive (destructiveHint=false)")
 	}
 }
 
@@ -155,3 +159,236 @@ func TestCreatePullRequestIncludesProjectKeyInRefs(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+func strPtr(v string) *string { return &v }
+
+func TestUpdatePullRequestAutoPreservesOmittedFields(t *testing.T) {
+	var requests []string
+	var putBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.String())
+		switch {
+		case strings.Contains(r.URL.Path, "/pull-requests/9") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":          9,
+				"version":     4,
+				"title":       "old",
+				"description": "olddesc",
+				"reviewers": []map[string]any{
+					{
+						"user": map[string]any{
+							"name":        "charlie",
+							"slug":        "charlie",
+							"displayName": "Charlie C",
+						},
+						"role":               "REVIEWER",
+						"approved":           true,
+						"lastReviewedCommit": "abc123",
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/pull-requests/9") && r.Method == http.MethodPut:
+			_ = json.NewDecoder(r.Body).Decode(&putBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 9})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	out := svc.UpdatePullRequest(context.Background(), updatePRInput{
+		RepositorySlug: "repo",
+		PullRequestID:  9,
+		Title:          strPtr("new"),
+	})
+	if !out.Success {
+		t.Fatalf("update out=%+v", out)
+	}
+
+	if len(requests) != 2 || requests[0] != "GET /rest/api/1.0/projects/PRJ/repos/repo/pull-requests/9" || requests[1] != "PUT /rest/api/1.0/projects/PRJ/repos/repo/pull-requests/9" {
+		t.Fatalf("requests = %v", requests)
+	}
+	if putBody["version"].(float64) != 4 {
+		t.Fatalf("version = %v, want 4", putBody["version"])
+	}
+	if putBody["title"] != "new" {
+		t.Fatalf("title = %v, want new (override)", putBody["title"])
+	}
+	if putBody["description"] != "olddesc" {
+		t.Fatalf("description = %v, want olddesc (preserved)", putBody["description"])
+	}
+	reviewers, ok := putBody["reviewers"].([]any)
+	if !ok || len(reviewers) != 1 {
+		t.Fatalf("reviewers = %v, want one normalized entry", putBody["reviewers"])
+	}
+	reviewer := reviewers[0].(map[string]any)
+	if len(reviewer) != 1 {
+		t.Fatalf("reviewer = %v, want only the user key", reviewer)
+	}
+	user := reviewer["user"].(map[string]any)
+	if len(user) != 1 || user["name"] != "charlie" {
+		t.Fatalf("reviewer user = %v, want {name: charlie} only (no slug/displayName)", user)
+	}
+}
+
+func TestNormalizeReviewersStripsReadOnlyFieldsAndPreservesUnnormalizable(t *testing.T) {
+	full := []any{
+		map[string]any{
+			// A cleanly-normalizable participant: reduced to {"user":{"name":...}},
+			// dropping read-only fields (slug, displayName, role, approved, ...).
+			"user": map[string]any{
+				"name":        "charlie",
+				"slug":        "charlie",
+				"displayName": "Charlie C",
+			},
+			"role":               "REVIEWER",
+			"approved":           true,
+			"lastReviewedCommit": "abc123",
+		},
+		map[string]any{
+			// Empty user.name can't be normalized to a usable write entry, but
+			// this is the "reviewers untouched" path: the reviewer must be
+			// preserved (with its original user sub-object) rather than
+			// silently dropped from the update.
+			"user": map[string]any{"name": "", "slug": "empty-name-user"},
+		},
+		map[string]any{
+			// Missing user.name entirely: same fallback-preserve behavior.
+			"user": map[string]any{"slug": "no-name-user"},
+		},
+		map[string]any{
+			// user.name of the wrong type: same fallback-preserve behavior.
+			"user": map[string]any{"name": 42, "slug": "wrong-type-user"},
+		},
+		map[string]any{
+			// No "user" key at all: not a participant object, nothing to
+			// preserve, so this entry is skipped entirely.
+			"role": "REVIEWER",
+		},
+	}
+	got := normalizeReviewers(full)
+	if len(got) != 4 {
+		t.Fatalf("normalizeReviewers(full) returned %d entries, want 4 (the no-user entry skipped); got %+v", len(got), got)
+	}
+
+	// Entry 0: cleanly normalized down to {"user":{"name":"charlie"}} only.
+	if user, ok := got[0]["user"].(map[string]any); !ok || len(user) != 1 || user["name"] != "charlie" || len(got[0]) != 1 {
+		t.Fatalf("got[0] = %+v, want {user:{name:charlie}} only", got[0])
+	}
+
+	// Entry 1: empty name preserved verbatim (including the read-only slug),
+	// not dropped and not reduced to {"name":""}.
+	if user, ok := got[1]["user"].(map[string]any); !ok || user["name"] != "" || user["slug"] != "empty-name-user" {
+		t.Fatalf("got[1] = %+v, want original user sub-object preserved verbatim", got[1])
+	}
+
+	// Entry 2: missing name preserved verbatim.
+	if user, ok := got[2]["user"].(map[string]any); !ok || user["slug"] != "no-name-user" {
+		t.Fatalf("got[2] = %+v, want original user sub-object preserved verbatim", got[2])
+	}
+
+	// Entry 3: wrong-type name preserved verbatim.
+	if user, ok := got[3]["user"].(map[string]any); !ok || user["name"] != 42 || user["slug"] != "wrong-type-user" {
+		t.Fatalf("got[3] = %+v, want original user sub-object preserved verbatim", got[3])
+	}
+
+	if got := normalizeReviewers(nil); got == nil || len(got) != 0 {
+		t.Fatalf("normalizeReviewers(nil) = %v, want empty non-nil slice", got)
+	}
+	if got := normalizeReviewers("not-a-list"); got == nil || len(got) != 0 {
+		t.Fatalf("normalizeReviewers(non-array) = %v, want empty non-nil slice", got)
+	}
+}
+
+func TestUpdatePullRequestClearsReviewersWithEmptySlice(t *testing.T) {
+	var putBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/pull-requests/9") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 9, "version": 4, "title": "old"})
+		case strings.Contains(r.URL.Path, "/pull-requests/9") && r.Method == http.MethodPut:
+			_ = json.NewDecoder(r.Body).Decode(&putBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 9})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	out := svc.UpdatePullRequest(context.Background(), updatePRInput{
+		RepositorySlug: "repo",
+		PullRequestID:  9,
+		Reviewers:      &[]reviewerInput{},
+	})
+	if !out.Success {
+		t.Fatalf("update out=%+v", out)
+	}
+	reviewers, ok := putBody["reviewers"]
+	if !ok {
+		t.Fatalf("reviewers key missing from PUT body, want present-but-empty")
+	}
+	list, ok := reviewers.([]any)
+	if !ok || len(list) != 0 {
+		t.Fatalf("reviewers = %v, want empty array", reviewers)
+	}
+}
+
+func TestUpdatePullRequestPropagatesGetFailure(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.String())
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"errors": []map[string]any{{"message": "not found", "exceptionName": "NoSuchPullRequestException"}},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	out := svc.UpdatePullRequest(context.Background(), updatePRInput{RepositorySlug: "repo", PullRequestID: 9})
+	if out.Success {
+		t.Fatalf("expected failure, got %+v", out)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("requests = %v, want exactly one GET (no PUT)", requests)
+	}
+}
+
+func TestUpdatePullRequestPropagatesConflictWithoutRetry(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.String())
+		switch {
+		case strings.Contains(r.URL.Path, "/pull-requests/9") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 9, "version": 4, "title": "old"})
+		case strings.Contains(r.URL.Path, "/pull-requests/9") && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"errors": []map[string]any{{"message": "stale version", "exceptionName": "PullRequestOutOfDateException"}},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	out := svc.UpdatePullRequest(context.Background(), updatePRInput{RepositorySlug: "repo", PullRequestID: 9, Title: strPtr("new")})
+	if out.Success {
+		t.Fatalf("expected failure, got %+v", out)
+	}
+	if out.Error == nil || out.Error.HTTPCode != http.StatusConflict {
+		t.Fatalf("expected HTTP status 409 surfaced, got %+v", out.Error)
+	}
+	puts := 0
+	for _, r := range requests {
+		if strings.HasPrefix(r, "PUT ") {
+			puts++
+		}
+	}
+	if puts != 1 {
+		t.Fatalf("PUT count = %d, want exactly 1 (no retry); requests=%v", puts, requests)
+	}
+}

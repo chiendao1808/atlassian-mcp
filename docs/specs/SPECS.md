@@ -40,7 +40,7 @@ Rules:
 
 > **For agentic workers:** Implement task-by-task with test-first development and an independent review gate after every task. This document is a planning artifact only; it intentionally contains no backward-compatibility work for names that were never released.
 
-**Goal:** Build one Go MCP stdio binary named `atlassian-mcp` that exposes independent Bitbucket Server 5.10.2 and Jira Server 6.4.14 modules, including 26 Bitbucket repository/commit/pull-request tools and Jira issue authentication, read, comment, field update, and transition tools.
+**Goal:** Build one Go MCP stdio binary named `atlassian-mcp` that exposes independent Bitbucket Server 5.10.2 and Jira Server 6.4.14 modules, including 27 Bitbucket repository/commit/pull-request tools and Jira issue authentication, read, comment, field update, and transition tools.
 
 **Architecture:** A shared MCP application hosts a module registry and common transport, TLS, HTTP, error, logging, and result infrastructure. `internal/bitbucket` and `internal/jira` are isolated business modules that register tools only when their static configuration is valid. Either module can run alone, both can run together, and failure in one module must not block the other.
 
@@ -91,7 +91,7 @@ The repository containing the `atlassian-mcp` source can be hosted on GitHub, Gi
 
 - One `atlassian-mcp` stdio process.
 - Independent Jira and Bitbucket modules.
-- The 26 Bitbucket repository, branch, file, commit, compare, diff, pull-request, review, and lifecycle tools enumerated in Section 10.
+- The 27 Bitbucket repository, branch, file, commit, compare, diff, pull-request, review, and lifecycle tools enumerated in Section 10.
 - Jira session authentication with Basic Auth credentials supplied through `jira_authenticate` once per MCP process session.
 - Jira issue read, comment, generic field update, and transition tools using `issueIdOrKey`.
 - Optional read-back after Jira mutation.
@@ -703,7 +703,7 @@ Do not infer undocumented fields, enum values, status bodies, permissions, retry
 - Read retry follows the shared bounded policy. Branch creation, file commit, PR creation/comment/status/transition are sent at most once.
 - Error handling preserves sanitized upstream `errors[]` and endpoint context; notably, PR transition `409` is not automatically “stale version”.
 
-### 10.3 Exact 26-tool registry and API links
+### 10.3 Exact 27-tool registry and API links
 
 - [`bitbucket_get_repository`](bitbucket-tool-implementation-guide.md#tool-bitbucket_get_repository) — `GET /projects/{projectKey}/repos/{repositorySlug}`; 200 JSON repository.; REPO_READ on the repository.
 - [`bitbucket_list_branches`](bitbucket-tool-implementation-guide.md#tool-bitbucket_list_branches) — `GET /projects/{projectKey}/repos/{repositorySlug}/branches`; 200 JSON page.; REPO_READ.
@@ -731,6 +731,7 @@ Do not infer undocumented fields, enum values, status bodies, permissions, retry
 - [`bitbucket_merge_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_merge_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/merge`; 200 JSON merged pull request.; REPO_WRITE.
 - [`bitbucket_decline_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_decline_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/decline`; 200 response; preserve a JSON PR if supplied by the host, otherwise a successful empty result plus resolved version.; REPO_READ per the 5.10.2 endpoint documentation.
 - [`bitbucket_reopen_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_reopen_pull_request) — `POST /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}/reopen`; 200 JSON reopened pull request.; REPO_READ.
+- [`bitbucket_update_pull_request`](bitbucket-tool-implementation-guide.md#tool-bitbucket_update_pull_request) — `PUT /projects/{projectKey}/repos/{repositorySlug}/pull-requests/{pullRequestId}`; 200 JSON updated pull request with bumped version.; PR author or equivalent repository write permission.
 
 ### 10.4 High-risk contract decisions
 
@@ -1272,7 +1273,7 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 **Interfaces:**
 
 - Consumes PR read/mergeability methods from Task 9.
-- Produces merge, decline, reopen tools and the complete 26-tool Bitbucket registry.
+- Produces merge, decline, reopen tools and the complete 27-tool Bitbucket registry.
 
 **Steps:**
 
@@ -1287,7 +1288,7 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - [ ] Implement merge, decline, and reopen with at most one POST.
 - [ ] Validate compatible current PR state.
 - [ ] On `409`, optionally GET current PR once, return current state, and do not replay.
-- [ ] Register exactly the 26 names in Section 10.7.
+- [ ] Register exactly the 27 names in Section 10.7.
 - [ ] Apply read/write/destructive/idempotency/open-world annotations.
 - [ ] Add Codex/Claude approval guidance for all Bitbucket mutations.
 - [ ] Generate/update all Bitbucket tool docs and the coverage matrix.
@@ -1303,7 +1304,7 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - [ ] Network reset after POST with request count one.
 - [ ] `409` safe refresh with request count one for POST.
 - [ ] Concurrent version-change fixture.
-- [ ] Registry exact-name count is 26.
+- [ ] Registry exact-name count is 27.
 - [ ] Every registered schema requires `repositorySlug`.
 - [ ] No unknown outer properties.
 - [ ] Annotation snapshots.
@@ -1695,7 +1696,7 @@ https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/<ref>/scripts/insta
 - Jira tools before authentication.
 - Successful authentication followed by all Jira tools.
 - Failed re-authentication preserving old session.
-- Bitbucket registry exposes exactly 26 tools and every schema requires `repositorySlug`.
+- Bitbucket registry exposes exactly 27 tools and every schema requires `repositorySlug`.
 - Bitbucket repository/branch read-write flow.
 - Bitbucket file/commit/compare/diff read flow with pagination and truncation.
 - Bitbucket single-file commit create/update/conflict flow.
@@ -1760,7 +1761,7 @@ https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/<ref>/scripts/insta
 | Layer | Focus |
 |---|---|
 | Unit | Shared/module config, URL construction, Jira session store, Bitbucket pagination/version helpers, validators, redaction, truncation, refresh result composition |
-| HTTP contract | Exact Jira and all 26 Bitbucket tool method/path/query/header/body/status parsing against request-recording mock servers |
+| HTTP contract | Exact Jira and all 27 Bitbucket tool method/path/query/header/body/status parsing against request-recording mock servers |
 | MCP protocol | Tool list, schema, annotations, stdio framing, structured results |
 | Installer | Parameter parsing, source checkout, generated configs, rollback, idempotency |
 | Internal staging smoke | Real Jira 6.4.14 and Bitbucket 5.10.2 compatibility |
@@ -1984,7 +1985,7 @@ No installer example includes Jira username/password.
 - [ ] Transitions support exactly one of ID/name and native `fields`/`update`.
 - [ ] Mutation read-back supports `returnIssue`, `returnFields`, and `returnExpand`.
 - [ ] Refresh failure is represented as partial success and never replays mutation.
-- [ ] Bitbucket registry exposes exactly the 26 tools listed in Section 10.7.
+- [ ] Bitbucket registry exposes exactly the 27 tools listed in Section 10.7.
 - [ ] Every Bitbucket tool has endpoint-level contract tests and requires `repositorySlug`.
 - [ ] Repository/branch, file/commit/diff, single-file commit, PR read/create/comment/review, and PR transition test suites pass.
 - [ ] Bitbucket pagination, response limits, diff truncation, no-secret logging, no-blind-retry, and PR optimistic-locking invariants pass.
@@ -2036,7 +2037,7 @@ Where the reference says behavior may depend on patch/configuration, the impleme
 ## 21. Recommended execution order
 
 1. Tasks 1–4: freeze names and build shared platform infrastructure.
-2. Tasks 5–11: implement and verify the complete 26-tool Bitbucket module.
+2. Tasks 5–11: implement and verify the complete 27-tool Bitbucket module.
 3. Tasks 12–15: establish Jira module, client, session store, and authentication.
 4. Tasks 16–19: implement Jira business tools in read-to-write order.
 5. Task 20: finalize Jira security and approval behavior.

@@ -25,7 +25,7 @@ Typical responsibilities:
 - Discover project rules, memory-bank content, agent context, and applicable project skills.
 - Report exact file paths, symbols, relationships, evidence, and unresolved gaps.
 
-## `designer`
+## `uiux_designer`
 
 Handles product design, web design, application design, UI/UX, accessibility, and design-system tasks.
 
@@ -76,6 +76,19 @@ Typical responsibilities:
 - Report each issue with its severity, description, file and line position, impact, evidence, and suggested fix.
 - Produce a concise review summary suitable for follow-up work assignment.
 
-## Workflow Instructions
+## Skills
 
-Workflow selection and orchestration rules are defined separately in [`.codex/orchestration/ORCHESTRATOR.md`](./.codex/orchestration/ORCHESTRATOR.md).
+Repository-local skills live under [`.agents/skills/`](../.agents/skills/). Agents must look there when deciding whether a task has applicable skills, in addition to any globally installed skills made available by the runtime.
+
+- [`.agents/skills/self/`](../.agents/skills/self/) contains personal skills maintained for this workspace. Prefer these when they match the task because they capture local conventions and user-specific expectations.
+- [`.agents/skills/community/`](../.agents/skills/community/) contains third-party or community-collected skills. Use these when they match the technology, workflow, or review concern being handled.
+- Treat each `SKILL.md` under those folders as a skill entrypoint. Search by folder name, frontmatter `name`/`description`, and task keywords; `rg --files .agents/skills -g SKILL.md` is the fastest inventory command.
+- Before taking task actions, read the selected `SKILL.md` completely and follow its trigger rules, checklist, references, and relative-path instructions. Resolve referenced files relative to that skill's folder.
+- If multiple skills apply, load the smallest useful set. Process/orchestration skills should guide the approach first, then language, framework, testing, documentation, or review skills.
+- If no local skill applies, say so only when relevant and continue with the normal agent instructions.
+
+## Orchestration
+
+Workflow selection and orchestration rules are defined separately in [`.codex/orchestration/ORCHESTRATOR.md`](./.codex/ORCHESTRATOR.md).
+
+The main agent owns workflow selection, runtime state, transitions, approvals, and completion.

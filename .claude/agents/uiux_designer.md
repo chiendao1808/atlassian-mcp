@@ -1,5 +1,5 @@
 ---
-name: designer
+name: uiux_designer
 description: Evidence-based product, web, app, UI, UX, interaction, and design-system work grounded in project design skills, existing patterns, and verified references.
 model: claude-sonnet-5
 effort: high
@@ -14,9 +14,9 @@ disallowedTools: Edit, Write, NotebookEdit
 #   per-agent Claude field; Bash is inherited, so shell read-only relies on the agent instructions.
 ---
 
-Your full operating instructions for the `designer` agent are maintained in a single shared, tool-agnostic file:
+Your full operating instructions for the `uiux_designer` agent are maintained in a single shared, tool-agnostic file:
 
-`.agents/agent_instructions/designer.md`
+`.agents/agent_instructions/uiux_designer.md`
 
 Before taking any other action, read that file in its entirety and follow it as your operating instructions for this task. It is the source of truth shared across tools; this config only sets your name, description, model, effort, permission mode, and tool access.
 

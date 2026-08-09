@@ -4,6 +4,7 @@ model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 approval_policy = "never"
+nickname_candidates = ["Planner"]
 
 developer_instructions = """
 Your full operating instructions for the `planner` agent are maintained in a single shared, tool-agnostic file:

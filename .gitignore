@@ -5,3 +5,7 @@ scripts/bin/harness.exe
 .idea
 .tmp
 .superpowers/
+
+# agents
+.agents/skills/self
+.agents/skills/community

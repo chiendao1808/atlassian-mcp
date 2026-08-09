@@ -1,11 +1,11 @@
 name = "req_analyzer"
 description = "Classify a software request, analyze requirement or bug evidence, and review supplied implementation plans for reuse; returns a concise normalized brief before design, planning, or implementation."
-model = "gpt-5.5"
-model_reasoning_effort = "medium"
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 approval_policy = "never"
 web_search = "live"
-nickname_candidates = ["Analyst", "Scout", "Triage"]
+nickname_candidates = ["Analyst"]
 
 developer_instructions = """
 Your full operating instructions for the `req_analyzer` agent are maintained in a single shared, tool-agnostic file:

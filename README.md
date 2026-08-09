@@ -18,7 +18,7 @@ https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/<ref>/scripts/insta
 https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/<ref>/scripts/install-from-remote.ps1
 ```
 
-`<ref>` is a specific release tag, a branch, or a full commit SHA -- `raw.githubusercontent.com` has no built-in "latest". The bootstrap examples below resolve a literal `latest` to the newest published release tag via the GitHub Releases API before building this URL; pin `<ref>` to a specific tag or SHA instead for a reproducible, audited production install. Installer examples use the same repository as the default source:
+Use a release tag or full commit SHA for `<ref>` in production. Installer examples use the same repository as the default source:
 
 ```text
 --source-repo-url https://github.com/chiendao1808/atlassian-mcp.git
@@ -106,15 +106,10 @@ echo "$JIRA_PASSWORD"
 
 Skip the Jira line entirely if you do not want `jira_authenticate` to have a credential fallback (see [ADR-0004](docs/decisions/0004-jira-credential-env-fallback.md)) or automatic startup authentication (see [ADR-0005](docs/decisions/0005-jira-auto-authenticate-on-startup.md)) -- omitting `--jira-username` from the install command below leaves that feature off.
 
-Fetch it from the canonical GitHub raw URL. `raw.githubusercontent.com` has no built-in notion of "latest" -- resolve it to the newest published release tag via the GitHub Releases API first, then use that resolved tag for both the raw fetch and `--source-ref`. Pin `INSTALLER_REF` to a specific release tag or full commit SHA instead of `latest` if you need a reproducible, audited install:
+Fetch it from the canonical GitHub raw URL. Use a release tag or full commit SHA for `INSTALLER_REF` in production:
 
 ```bash
-INSTALLER_REF='latest'
-if [[ "$INSTALLER_REF" == "latest" ]]; then
-  INSTALLER_REF="$(curl -fsSL https://api.github.com/repos/chiendao1808/atlassian-mcp/releases/latest |
-    grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-  [[ -n "$INSTALLER_REF" ]] || { echo "could not resolve latest release tag" >&2; exit 1; }
-fi
+INSTALLER_REF='v1.0.0'
 INSTALLER_URL="https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/${INSTALLER_REF}/scripts/install-from-remote.sh"
 
 curl -fsSL "$INSTALLER_URL" |
@@ -154,7 +149,7 @@ Do not put credentials in the raw URL or `--source-repo-url`. Use SSH, a Git cre
 | --- | --- | --- | --- | --- |
 | `--source-repo-url` | Yes, unless `--binary` is set | `https://github.com/chiendao1808/atlassian-mcp.git` | *(empty)* | Provider-neutral Git remote to clone and build `cmd/atlassian-mcp` from. Must not contain embedded credentials. |
 | `--binary` | No (alternative to `--source-repo-url`) | `/path/to/atlassian-mcp` | *(empty)* | Path to a prebuilt binary to install directly, skipping clone and build. |
-| `--source-ref` | No | `latest` | `main` | Git ref (branch, tag, or commit) checked out after cloning. |
+| `--source-ref` | No | `v1.0.0` | `main` | Git ref (branch, tag, or commit) checked out after cloning. |
 | `--source-clone-depth` | No | `1` | `1` | Depth passed to `git clone`/`git fetch` for the source checkout. |
 | `--keep-source` | No (flag) | — | disabled (source is cleaned up after a successful install) | Keeps the temporary cloned checkout on disk after install, for debugging. |
 | `--install-dir` | No | `/home/me/.local/bin` | `$HOME/.local/bin` | Directory the built/provided binary and the generated wrapper script are installed into. |
@@ -221,16 +216,10 @@ $env:JIRA_PASSWORD
 
 Skip the Jira line entirely if you do not want `jira_authenticate` to have a credential fallback (see ADR-0004) or automatic startup authentication (see ADR-0005) — omitting `-JiraUsername` from the install command below leaves that feature off.
 
-Fetch it from the canonical GitHub raw URL to a temporary file, then run that file explicitly. `raw.githubusercontent.com` has no built-in notion of "latest" -- resolve it to the newest published release tag via the GitHub Releases API first, then use that resolved tag for both the raw fetch and `-SourceRef`. Pin `$INSTALLER_REF` to a specific release tag or full commit SHA instead of `latest` if you need a reproducible, audited install:
+Fetch it from the canonical GitHub raw URL to a temporary file, then run that file explicitly:
 
 ```powershell
-$INSTALLER_REF = 'latest'
-if ($INSTALLER_REF -eq 'latest') {
-    $INSTALLER_REF = (Invoke-RestMethod -Uri 'https://api.github.com/repos/chiendao1808/atlassian-mcp/releases/latest').tag_name
-    if ([string]::IsNullOrEmpty($INSTALLER_REF)) {
-        throw 'could not resolve latest release tag'
-    }
-}
+$INSTALLER_REF = 'v1.0.0'
 $InstallerUrl = "https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/${INSTALLER_REF}/scripts/install-from-remote.ps1"
 $InstallerFile = Join-Path $env:TEMP 'install-from-remote.ps1'
 
@@ -272,7 +261,7 @@ PowerShell 7 users may replace `powershell.exe` with `pwsh`. Do not put credenti
 | --- | --- | --- | --- | --- |
 | `-SourceRepoUrl` | Yes, unless `-Binary` is set | `https://github.com/chiendao1808/atlassian-mcp.git` | *(empty)* | Provider-neutral Git remote to clone and build `cmd/atlassian-mcp` from. Must not contain embedded credentials. |
 | `-Binary` | No (alternative to `-SourceRepoUrl`) | `C:\path\to\atlassian-mcp.exe` | *(empty)* | Path to a prebuilt binary to install directly, skipping clone and build. |
-| `-SourceRef` | No | `latest` | `main` | Git ref (branch, tag, or commit) checked out after cloning. |
+| `-SourceRef` | No | `v1.0.0` | `main` | Git ref (branch, tag, or commit) checked out after cloning. |
 | `-SourceCloneDepth` | No | `1` | `1` | Depth passed to `git clone`/`git fetch` for the source checkout. |
 | `-KeepSource` | No (switch) | — | disabled (source is cleaned up after a successful install) | Keeps the temporary cloned checkout on disk after install, for debugging. |
 | `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the built/provided binary (`atlassian-mcp.exe`) is installed into. There is no wrapper script; Claude/Codex are registered to run this exe directly. |

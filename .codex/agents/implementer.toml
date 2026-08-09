@@ -5,6 +5,7 @@ model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 approvals_reviewer = "user"
+nickname_candidates = ["Developer", "Implementer"]
 
 developer_instructions = """
 Your full operating instructions for the `implementer` agent are maintained in a single shared, tool-agnostic file:

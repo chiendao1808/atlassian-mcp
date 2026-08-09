@@ -1,7 +1,7 @@
 name = "code_reviewer"
 description = "Senior read-only review of changed code and runtime-affecting artifacts, using plans, memory, and agent context only as scoped supporting evidence."
-model = "gpt-5.6-terra"
-model_reasoning_effort = "high"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 approval_policy = "never"
 nickname_candidates = ["Reviewer", "Sentinel", "Auditor"]

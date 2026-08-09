@@ -29,7 +29,7 @@ Performs focused, read-only exploration of the codebase and returns implementati
 
 Read-only. Model: sonnet.
 
-### `designer`
+### `uiux_designer`
 
 Handles product design, web design, application design, UI/UX, accessibility, and design-system tasks.
 
@@ -79,13 +79,20 @@ Reviews the current Git changes and returns actionable findings without modifyin
 
 Read-only. Model: opus.
 
+## Skills
+
+Repository-local skills live under [`.agents/skills/`](../.agents/skills/). The main agent and subagents must look there when deciding whether a task has applicable skills, in addition to any globally installed skills made available by Claude Code or the surrounding runtime.
+
+- [`.agents/skills/self/`](../.agents/skills/self/) contains personal skills maintained for this workspace. Prefer these when they match the task because they capture local conventions and user-specific expectations.
+- [`.agents/skills/community/`](../.agents/skills/community/) contains third-party or community-collected skills. Use these when they match the technology, workflow, or review concern being handled.
+- Treat each `SKILL.md` under those folders as a skill entrypoint. Search by folder name, frontmatter `name`/`description`, and task keywords; `rg --files .agents/skills -g SKILL.md` is the fastest inventory command.
+- Before taking task actions, read the selected `SKILL.md` completely and follow its trigger rules, checklist, references, and relative-path instructions. Resolve referenced files relative to that skill's folder.
+- If multiple skills apply, load the smallest useful set. Process/orchestration skills should guide the approach first, then language, framework, testing, documentation, or review skills.
+- If no local skill applies, say so only when relevant and continue with the normal agent instructions.
+
 ## Orchestration
 
-Workflow selection and orchestration rules are defined in [`.agents/orchestration/ORCHESTRATOR.md`](../.agents/orchestration/ORCHESTRATOR.md), with three workflows:
-
-- Feature Development — [`.agents/orchestration/wf_feature_development/WORKFLOW.md`](../.agents/orchestration/wf_feature_development/WORKFLOW.md)
-- Bug Resolution — [`.agents/orchestration/wf_bug_resolving/WORKFLOW.md`](../.agents/orchestration/wf_bug_resolving/WORKFLOW.md)
-- Code Review & Remediation — [`.agents/orchestration/wf_code_review/WORKFLOW.md`](../.agents/orchestration/wf_code_review/WORKFLOW.md)
+Workflow selection and orchestration rules are defined separately in [`.claude/orchestration/ORCHESTRATOR.md`](./.claude/ORCHESTRATOR.md).
 
 The main agent owns workflow selection, runtime state, transitions, approvals, and completion. Because Claude Code has no built-in workflow state engine, the `state-model.md` files are authoritative *specifications* that the main agent follows manually — they are not automatically enforced.
 

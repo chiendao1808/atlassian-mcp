@@ -1,16 +1,16 @@
-name = "designer"
+name = "uiux_designer"
 description = "Evidence-based product, web, app, UI, UX, interaction, and design-system work grounded in project design skills, existing patterns, and verified references."
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 approval_policy = "never"
 web_search = "live"
-nickname_candidates = ["Canvas", "Muse", "Studio"]
+nickname_candidates = ["UI UX Designer"]
 
 developer_instructions = """
-Your full operating instructions for the `designer` agent are maintained in a single shared, tool-agnostic file:
+Your full operating instructions for the `uiux_designer` agent are maintained in a single shared, tool-agnostic file:
 
-`.agents/agent_instructions/designer.md`
+`.agents/agent_instructions/uiux_designer.md`
 
 Before taking any other action, read that file in its entirety and follow it as your operating instructions for this task. It is the source of truth shared across tools; this config only sets metadata such as model, sandbox mode, and approval policy.
 

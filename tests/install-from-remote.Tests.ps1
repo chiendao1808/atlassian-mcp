@@ -12,6 +12,7 @@ $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-ps-instal
 # values behind on the machine running these tests.
 $PersistedEnvKeys = @(
     'ATLASSIAN_TLS_VERIFY', 'JIRA_BASE_URL', 'JIRA_CA_FILE', 'JIRA_USERNAME', 'JIRA_PASSWORD',
+    'CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD',
     'BITBUCKET_BASE_URL', 'BITBUCKET_PROJECT_KEY', 'BITBUCKET_USER_SLUG',
     'BITBUCKET_CA_FILE', 'BITBUCKET_BEARER_TOKEN'
 )
@@ -151,7 +152,7 @@ exit 0
 }
 
 # Runs one isolated installer invocation with HOME, USERPROFILE, PATH, and project/install directories scoped to the case.
-function Invoke-InstallerCase($Name, [string[]]$Arguments, [hashtable]$ExtraEnv) {
+function Invoke-InstallerCase($Name, [string[]]$Arguments, [hashtable]$ExtraEnv, [bool]$UseNonInteractive = $true) {
     $caseDir = Join-Path $TmpRoot $Name
     $fakeBin = Join-Path $caseDir 'bin'
     New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project') | Out-Null
@@ -182,9 +183,11 @@ function Invoke-InstallerCase($Name, [string[]]$Arguments, [hashtable]$ExtraEnv)
             '-File', $Installer,
             '-InstallDir', (Join-Path $caseDir 'install'),
             '-ProjectDir', (Join-Path $caseDir 'project'),
-            '-Scope', 'Project',
-            '-NonInteractive'
+            '-Scope', 'Project'
         )
+        if ($UseNonInteractive) {
+            $baseArgs += '-NonInteractive'
+        }
         $oldErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         $output = & $PowerShellExe @baseArgs @Arguments *>&1
@@ -298,13 +301,18 @@ function Test-ModuleValidationAndNonSecretConfig {
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
         '-JiraUsername', 'jira-svc',
         '-JiraPasswordEnv', 'JIRA_SECRET_ENV',
+        '-EnableConfluence',
+        '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
+        '-ConfluenceCaFile', 'C:\certs\confluence-ca.pem',
+        '-ConfluenceUsername', 'confluence-svc',
+        '-ConfluencePasswordEnv', 'CONFLUENCE_SECRET_ENV',
         '-EnableBitbucket',
         '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
         '-BitbucketProjectKey', 'PRJ',
         '-BitbucketUserSlug', 'svc-atlassian-mcp',
         '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV',
         '-AtlassianTlsVerify', 'true'
-    ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token'; JIRA_SECRET_ENV = 'super-secret-password' }
+    ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token'; JIRA_SECRET_ENV = 'super-secret-password'; CONFLUENCE_SECRET_ENV = 'super-secret-confluence-password' }
 
     $codex = Join-Path $result.CaseDir 'project\.codex\config.toml'
     $claude = Join-Path $result.CaseDir 'project\.mcp.json'
@@ -315,12 +323,19 @@ function Test-ModuleValidationAndNonSecretConfig {
     Assert-NotContains $claude 'BITBUCKET_SECRET_ENV'
     Assert-NotContains $codex 'JIRA_SECRET_ENV'
     Assert-NotContains $claude 'JIRA_SECRET_ENV'
+    Assert-NotContains $codex 'CONFLUENCE_SECRET_ENV'
+    Assert-NotContains $claude 'CONFLUENCE_SECRET_ENV'
     Assert-Contains $codex '[mcp_servers.atlassian.env]'
     Assert-Contains $codex 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
     Assert-Contains $codex 'JIRA_USERNAME = "jira-svc"'
     Assert-Contains $codex 'JIRA_PASSWORD = "super-secret-password"'
+    Assert-Contains $codex 'CONFLUENCE_BASE_URL = "https://confluence.internal.example.com/confluence"'
+    Assert-Contains $codex 'CONFLUENCE_CA_FILE = "C:\\certs\\confluence-ca.pem"'
+    Assert-Contains $codex 'CONFLUENCE_USERNAME = "confluence-svc"'
+    Assert-Contains $codex 'CONFLUENCE_PASSWORD = "super-secret-confluence-password"'
     Assert-NotContains $claude 'super-secret-token'
     Assert-NotContains $claude 'super-secret-password'
+    Assert-NotContains $claude 'super-secret-confluence-password'
     Assert-Contains $codex 'args = []'
     if ((Get-Content -LiteralPath $codex -Raw).IndexOf('powershell.exe', [System.StringComparison]::Ordinal) -ge 0) {
         Fail "codex config should invoke the binary directly, not powershell.exe: $codex"
@@ -351,6 +366,18 @@ function Test-ModuleValidationAndNonSecretConfig {
     }
     if ([Environment]::GetEnvironmentVariable('JIRA_PASSWORD', 'User') -ne 'super-secret-password') {
         Fail 'JIRA_PASSWORD was not resolved from JIRA_SECRET_ENV and persisted'
+    }
+    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_BASE_URL', 'User') -ne 'https://confluence.internal.example.com/confluence') {
+        Fail 'CONFLUENCE_BASE_URL was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_CA_FILE', 'User') -ne 'C:\certs\confluence-ca.pem') {
+        Fail 'CONFLUENCE_CA_FILE was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_USERNAME', 'User') -ne 'confluence-svc') {
+        Fail 'CONFLUENCE_USERNAME was not persisted as a User environment variable'
+    }
+    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_PASSWORD', 'User') -ne 'super-secret-confluence-password') {
+        Fail 'CONFLUENCE_PASSWORD was not resolved from CONFLUENCE_SECRET_ENV and persisted'
     }
 
     $missing = Invoke-InstallerCase 'missing-project-key' @(
@@ -405,6 +432,83 @@ function Test-JiraUsernameRequiresEnableJiraAndPasswordEnv {
     ) @{}
     if ($missingPassword.ExitCode -eq 0 -or $missingPassword.Output -notmatch 'UNSET_JIRA_PASSWORD') {
         Fail "missing Jira password env was not rejected: $($missingPassword.Output)"
+    }
+}
+
+function Test-ConfluenceUsernameRequiresEnableConfluenceAndPasswordEnv {
+    $noConfluence = Invoke-InstallerCase 'confluence-username-without-enable' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
+        '-ConfluenceUsername', 'confluence-svc'
+    ) @{}
+    if ($noConfluence.ExitCode -eq 0 -or $noConfluence.Output -notmatch '-ConfluenceUsername requires -EnableConfluence') {
+        Fail "-ConfluenceUsername without -EnableConfluence was not rejected: $($noConfluence.Output)"
+    }
+
+    Remove-Item Env:UNSET_CONFLUENCE_PASSWORD -ErrorAction SilentlyContinue
+    $missingPassword = Invoke-InstallerCase 'confluence-username-missing-password' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableConfluence',
+        '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
+        '-ConfluenceUsername', 'confluence-svc',
+        '-ConfluencePasswordEnv', 'UNSET_CONFLUENCE_PASSWORD'
+    ) @{}
+    if ($missingPassword.ExitCode -eq 0 -or $missingPassword.Output -notmatch 'UNSET_CONFLUENCE_PASSWORD') {
+        Fail "missing Confluence password env was not rejected: $($missingPassword.Output)"
+    }
+
+    Remove-Item Env:UNSET_CONFLUENCE_PASSWORD_DRYRUN -ErrorAction SilentlyContinue
+    $dryRunMissingPassword = Invoke-InstallerCase 'confluence-dry-run-missing-password-interactive' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-DryRun',
+        '-EnableConfluence',
+        '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
+        '-ConfluenceUsername', 'confluence-svc',
+        '-ConfluencePasswordEnv', 'UNSET_CONFLUENCE_PASSWORD_DRYRUN'
+    ) @{} $false
+    if ($dryRunMissingPassword.ExitCode -eq 0 -or $dryRunMissingPassword.Output -notmatch 'UNSET_CONFLUENCE_PASSWORD_DRYRUN') {
+        Fail "dry-run without -NonInteractive accepted missing Confluence password env: $($dryRunMissingPassword.Output)"
+    }
+}
+
+function Test-ConfluencePersistedEnvClearsWhenDisabledOrCredentialsOmitted {
+    foreach ($key in @('CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')) {
+        [Environment]::SetEnvironmentVariable($key, "stale-$key", 'User')
+    }
+    [Environment]::SetEnvironmentVariable('CONFLUENCE_SECRET_ENV', 'fresh-secret', 'User')
+
+    Invoke-InstallerSuccess 'confluence-disabled-clears' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    ) | Out-Null
+    foreach ($key in @('CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')) {
+        if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($key, 'User'))) {
+            Fail "$key was not cleared when Confluence was disabled"
+        }
+    }
+
+    foreach ($key in @('CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')) {
+        [Environment]::SetEnvironmentVariable($key, "stale-$key", 'User')
+    }
+    Invoke-InstallerSuccess 'confluence-username-omitted-clears-credentials' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableConfluence',
+        '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence'
+    ) | Out-Null
+    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_BASE_URL', 'User') -ne 'https://confluence.internal.example.com/confluence') {
+        Fail 'CONFLUENCE_BASE_URL was not refreshed when Confluence stayed enabled'
+    }
+    foreach ($key in @('CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')) {
+        if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($key, 'User'))) {
+            Fail "$key was not cleared when omitted from Confluence reinstall"
+        }
     }
 }
 
@@ -652,6 +756,8 @@ try {
         'Test-ModuleValidationAndNonSecretConfig',
         'Test-NonInteractiveBitbucketRequiresTokenEnvValue',
         'Test-JiraUsernameRequiresEnableJiraAndPasswordEnv',
+        'Test-ConfluenceUsernameRequiresEnableConfluenceAndPasswordEnv',
+        'Test-ConfluencePersistedEnvClearsWhenDisabledOrCredentialsOmitted',
         'Test-AgentConfigEscapesBinaryPathForTomlAndJson',
         'Test-ClaudeCliRegistersScopeLocalAndUser',
         'Test-ClaudeCliMissingBinaryErrorsClearly',

@@ -15,6 +15,11 @@ param(
     [string]$JiraCaFile = '',
     [string]$JiraUsername = '',
     [string]$JiraPasswordEnv = 'JIRA_PASSWORD',
+    [switch]$EnableConfluence,
+    [string]$ConfluenceBaseUrl = '',
+    [string]$ConfluenceCaFile = '',
+    [string]$ConfluenceUsername = '',
+    [string]$ConfluencePasswordEnv = 'CONFLUENCE_PASSWORD',
     [switch]$EnableBitbucket,
     [string]$BitbucketBaseUrl = '',
     [string]$BitbucketProjectKey = '',
@@ -33,6 +38,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $Marker = 'atlassian-mcp managed block'
+$ManagedConfluenceEnvKeys = @('CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')
 $Script:Backups = @()
 $Script:SourceDir = ''
 $Script:InstallSucceeded = $false
@@ -89,10 +95,10 @@ function Reject-EmbeddedSourceCredentials($Value) {
     }
 }
 
-# Ensures the Bitbucket token indirection variable name is safe to look up and reference.
+# Ensures a credential indirection variable name is safe to look up and reference.
 function Validate-TokenEnvName($Value) {
     if ($Value -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
-        Die '-BitbucketTokenEnv must be an environment variable name'
+        Die 'credential environment variable name must be valid'
     }
 }
 
@@ -243,8 +249,9 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     [void][AtlassianMcpInstaller.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$result)
 }
 
-# Resolves the module config, plus the Bitbucket token, into the fixed environment variable names
-# the binary reads (internal/config, internal/jira, internal/bitbucket). Single source of truth for
+# Resolves module config and configured credential env-name indirection into fixed environment
+# variable names the binary reads (internal/config, internal/jira, internal/confluence,
+# internal/bitbucket). Single source of truth for
 # both Set-PersistedConfigEnv (Windows User env, for ambient-inheriting hosts and manual terminal use)
 # and Codex's per-server [mcp_servers.atlassian.env] table (Codex's own MCP child-process launcher does
 # not inherit the parent's ambient environment, confirmed via Codex's own logs showing the binary
@@ -270,6 +277,23 @@ function Get-ResolvedConfigEnv {
         $envVars['JIRA_USERNAME'] = $JiraUsername
         $envVars['JIRA_PASSWORD'] = $jiraPassword
     }
+    if ($EnableConfluence) {
+        $envVars['CONFLUENCE_BASE_URL'] = $ConfluenceBaseUrl
+    }
+    if (-not [string]::IsNullOrEmpty($ConfluenceCaFile)) {
+        $envVars['CONFLUENCE_CA_FILE'] = $ConfluenceCaFile
+    }
+    if (-not [string]::IsNullOrEmpty($ConfluenceUsername)) {
+        # Optional: lets confluence_authenticate use environment fallback and, when paired with
+        # a password at process startup, lets Confluence auto-authenticate without a tool call.
+        # The password is resolved by env-name indirection so it is never accepted as an argument.
+        $confluencePassword = Get-EnvValue $ConfluencePasswordEnv
+        if ([string]::IsNullOrEmpty($confluencePassword)) {
+            Die "CONFLUENCE password environment variable $ConfluencePasswordEnv is not set"
+        }
+        $envVars['CONFLUENCE_USERNAME'] = $ConfluenceUsername
+        $envVars['CONFLUENCE_PASSWORD'] = $confluencePassword
+    }
     if ($EnableBitbucket) {
         $envVars['BITBUCKET_BASE_URL'] = $BitbucketBaseUrl
         $envVars['BITBUCKET_PROJECT_KEY'] = $BitbucketProjectKey
@@ -290,10 +314,17 @@ function Get-ResolvedConfigEnv {
 
 # Persists the resolved config as User environment variables so hosts that do inherit ambient
 # environment (confirmed for Claude Code) and manual terminal runs of the binary pick it up.
+# Confluence keys are installer-managed as a set, so omitted values are cleared to prevent
+# stale credentials or stale static config from surviving a reinstall.
 # Processes already running at install time will not see these until restarted; Broadcast-
 # EnvironmentChange only refreshes processes launched afterward (e.g. via Explorer), not ones
 # already running.
 function Set-PersistedConfigEnv($EnvVars) {
+    foreach ($key in $ManagedConfluenceEnvKeys) {
+        if (-not $EnvVars.Contains($key)) {
+            [Environment]::SetEnvironmentVariable($key, $null, 'User')
+        }
+    }
     foreach ($key in $EnvVars.Keys) {
         [Environment]::SetEnvironmentVariable($key, $EnvVars[$key], 'User')
     }
@@ -303,8 +334,9 @@ function Set-PersistedConfigEnv($EnvVars) {
 # Produces Codex TOML with only the installer-managed block replaced. EnvVars is written as an
 # explicit [mcp_servers.atlassian.env] table -- required because Codex's MCP launcher does not
 # pass its own ambient environment through to spawned stdio servers (see Get-ResolvedConfigEnv).
-# This does put the Bitbucket token in Codex's config file, unlike the Claude Code path; that is a
-# deliberate, Codex-specific exception forced by Codex's launcher, not a general policy change. The
+# This does put configured Bitbucket/Jira/Confluence secret values in Codex's config file, unlike the
+# Claude Code path; that is a deliberate, Codex-specific exception forced by Codex's launcher, not a
+# general policy change. The
 # file keeps the same current-user-only ACL as the persisted User environment variable it mirrors.
 function New-CodexConfig($Path, $Command, $EnvVars) {
     $body = @()
@@ -496,8 +528,11 @@ try {
     if ($Agents -notin @('Claude', 'Codex', 'Both', 'None')) {
         Die '-Agents must be Claude, Codex, Both, or None'
     }
-    if (-not $EnableJira -and -not $EnableBitbucket) {
-        Die 'select at least one module with -EnableJira or -EnableBitbucket'
+    Validate-TokenEnvName $JiraPasswordEnv
+    Validate-TokenEnvName $ConfluencePasswordEnv
+    Validate-TokenEnvName $BitbucketTokenEnv
+    if (-not $EnableJira -and -not $EnableConfluence -and -not $EnableBitbucket) {
+        Die 'select at least one module with -EnableJira, -EnableConfluence, or -EnableBitbucket'
     }
     if ($EnableJira) {
         if ([string]::IsNullOrEmpty($JiraBaseUrl)) {
@@ -509,9 +544,22 @@ try {
         if (-not $EnableJira) {
             Die '-JiraUsername requires -EnableJira'
         }
-        Validate-TokenEnvName $JiraPasswordEnv
-        if ($NonInteractive -and [string]::IsNullOrEmpty((Get-EnvValue $JiraPasswordEnv))) {
-            Die "$JiraPasswordEnv is required for non-interactive installs when -JiraUsername is set"
+        if ([string]::IsNullOrEmpty((Get-EnvValue $JiraPasswordEnv))) {
+            Die "$JiraPasswordEnv is required when -JiraUsername is set"
+        }
+    }
+    if ($EnableConfluence) {
+        if ([string]::IsNullOrEmpty($ConfluenceBaseUrl)) {
+            Die '-ConfluenceBaseUrl is required with -EnableConfluence'
+        }
+        Require-ServiceUrl '-ConfluenceBaseUrl' $ConfluenceBaseUrl
+    }
+    if (-not [string]::IsNullOrEmpty($ConfluenceUsername)) {
+        if (-not $EnableConfluence) {
+            Die '-ConfluenceUsername requires -EnableConfluence'
+        }
+        if ([string]::IsNullOrEmpty((Get-EnvValue $ConfluencePasswordEnv))) {
+            Die "$ConfluencePasswordEnv is required when -ConfluenceUsername is set"
         }
     }
     if ($EnableBitbucket) {
@@ -522,9 +570,8 @@ try {
             Die '-BitbucketProjectKey is required with -EnableBitbucket'
         }
         Require-ServiceUrl '-BitbucketBaseUrl' $BitbucketBaseUrl
-        Validate-TokenEnvName $BitbucketTokenEnv
-        if ($NonInteractive -and [string]::IsNullOrEmpty((Get-EnvValue $BitbucketTokenEnv))) {
-            Die "$BitbucketTokenEnv is required for non-interactive Bitbucket installs"
+        if ([string]::IsNullOrEmpty((Get-EnvValue $BitbucketTokenEnv))) {
+            Die "$BitbucketTokenEnv is required for Bitbucket installs"
         }
     }
 

@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/chiendao1808/atlassian-mcp/internal/jira/auth"
+	"github.com/chiendao1808/atlassian-mcp/internal/auth"
 	"github.com/chiendao1808/atlassian-mcp/internal/observability"
 )
 

@@ -7,6 +7,7 @@ import (
 	"github.com/chiendao1808/atlassian-mcp/internal/app"
 	"github.com/chiendao1808/atlassian-mcp/internal/bitbucket"
 	"github.com/chiendao1808/atlassian-mcp/internal/config"
+	"github.com/chiendao1808/atlassian-mcp/internal/confluence"
 	"github.com/chiendao1808/atlassian-mcp/internal/jira"
 )
 
@@ -30,6 +31,26 @@ func TestNewServerKeepsJiraEnabledWhenBitbucketConfigIsInvalid(t *testing.T) {
 		bitbucket.NewModule(env(map[string]string{"BITBUCKET_BASE_URL": "://bad"})),
 	)
 	if !statuses["jira"].Enabled || statuses["bitbucket"].Enabled {
+		t.Fatalf("statuses = %+v", statuses)
+	}
+}
+
+func TestNewServerKeepsJiraEnabledWhenConfluenceConfigIsInvalid(t *testing.T) {
+	_, statuses := app.NewServer("test", config.Shared{}, io.Discard,
+		jira.NewModule(env(map[string]string{"JIRA_BASE_URL": "https://jira.internal.example.com/jira"})),
+		confluence.NewModule(env(map[string]string{"CONFLUENCE_BASE_URL": "://bad"})),
+	)
+	if !statuses["jira"].Enabled || statuses["confluence"].Enabled {
+		t.Fatalf("statuses = %+v", statuses)
+	}
+}
+
+func TestNewServerKeepsConfluenceEnabledWhenJiraConfigIsInvalid(t *testing.T) {
+	_, statuses := app.NewServer("test", config.Shared{}, io.Discard,
+		jira.NewModule(env(map[string]string{"JIRA_BASE_URL": "://bad"})),
+		confluence.NewModule(env(map[string]string{"CONFLUENCE_BASE_URL": "https://wiki.internal.example.com/confluence"})),
+	)
+	if !statuses["confluence"].Enabled || statuses["jira"].Enabled {
 		t.Fatalf("statuses = %+v", statuses)
 	}
 }

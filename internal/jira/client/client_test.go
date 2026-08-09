@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chiendao1808/atlassian-mcp/internal/jira/auth"
+	"github.com/chiendao1808/atlassian-mcp/internal/auth"
 )
 
 func TestClientBuildsContextPathURLAndAddsBasicAuth(t *testing.T) {

@@ -54,3 +54,22 @@ func TestStoreConcurrentSnapshotsDuringReplacement(t *testing.T) {
 	store.Replace(NewCredential("alice", "two"))
 	wg.Wait()
 }
+
+func TestReplaceIfUnchangedSkipsStaleReplacement(t *testing.T) {
+	store := NewSessionStore()
+	if !store.ReplaceIfUnchanged(NewCredential("alice", "one"), nil) {
+		t.Fatal("empty store should accept nil expected credential")
+	}
+	initial, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Replace(NewCredential("bob", "two"))
+	if store.ReplaceIfUnchanged(NewCredential("carol", "three"), &initial) {
+		t.Fatal("stale expected credential should not replace newer session")
+	}
+	snap, err := store.Snapshot()
+	if err != nil || snap.Username() != "bob" {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+}

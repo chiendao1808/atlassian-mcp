@@ -50,7 +50,7 @@ Creates an implementation-ready technical plan based on verified requirements an
 - Identify missing information and blocking questions instead of making unsupported assumptions.
 - Present the plan for user review and approval.
 
-Read-only. Model: opus.
+May create or update planning documents only in the workspace. Model: opus.
 
 ### `implementer`
 

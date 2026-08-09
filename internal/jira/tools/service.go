@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/chiendao1808/atlassian-mcp/internal/jira/auth"
+	"github.com/chiendao1808/atlassian-mcp/internal/auth"
 	"github.com/chiendao1808/atlassian-mcp/internal/jira/client"
 	"github.com/chiendao1808/atlassian-mcp/internal/observability"
 	"github.com/chiendao1808/atlassian-mcp/internal/result"

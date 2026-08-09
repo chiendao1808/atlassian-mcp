@@ -4,7 +4,7 @@ model = "gpt-5.6-luna"
 model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 approval_policy = "never"
-nickname_candidates = ["Scouter"]
+nickname_candidates = ["Explorer", "Scouter"]
 
 developer_instructions = """
 Your full operating instructions for the `explorer` agent are maintained in a single shared, tool-agnostic file:

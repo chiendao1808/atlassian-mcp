@@ -9,6 +9,7 @@ import (
 	"github.com/chiendao1808/atlassian-mcp/internal/app"
 	"github.com/chiendao1808/atlassian-mcp/internal/bitbucket"
 	"github.com/chiendao1808/atlassian-mcp/internal/config"
+	"github.com/chiendao1808/atlassian-mcp/internal/confluence"
 	"github.com/chiendao1808/atlassian-mcp/internal/jira"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -28,13 +29,17 @@ func main() {
 		os.Exit(2)
 	}
 	jiraModule := jira.NewModule(os.Getenv)
-	server, statuses := app.NewServer(version, shared, os.Stderr, jiraModule, bitbucket.NewModule(os.Getenv, os.Stderr))
-	if !statuses["jira"].Enabled && !statuses["bitbucket"].Enabled {
+	confluenceModule := confluence.NewModule(os.Getenv)
+	server, statuses := app.NewServer(version, shared, os.Stderr, jiraModule, confluenceModule, bitbucket.NewModule(os.Getenv, os.Stderr))
+	if !statuses["jira"].Enabled && !statuses["confluence"].Enabled && !statuses["bitbucket"].Enabled {
 		fmt.Fprintln(os.Stderr, "no Atlassian business module enabled")
 	}
 	ctx := context.Background()
 	if statuses["jira"].Enabled {
 		go jiraModule.AutoAuthenticate(ctx, os.Stderr)
+	}
+	if statuses["confluence"].Enabled {
+		go confluenceModule.AutoAuthenticate(ctx, os.Stderr)
 	}
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, err)

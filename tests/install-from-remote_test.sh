@@ -252,6 +252,7 @@ test_service_base_urls_reject_embedded_credentials() {
 test_module_validation_and_non_secret_config() {
   export BITBUCKET_SECRET_ENV='super-secret-token'
   export JIRA_SECRET_ENV='super-secret-password'
+  export CONFLUENCE_SECRET_ENV='super-secret-confluence-password'
   run_installer both \
     --binary "$REPO_ROOT/go.mod" \
     --skip-tests \
@@ -260,6 +261,11 @@ test_module_validation_and_non_secret_config() {
     --jira-base-url https://jira.internal.example.com/jira \
     --jira-username jira-svc \
     --jira-password-env JIRA_SECRET_ENV \
+    --enable-confluence \
+    --confluence-base-url https://confluence.internal.example.com/confluence \
+    --confluence-ca-file /etc/ssl/certs/confluence-ca.pem \
+    --confluence-username confluence-svc \
+    --confluence-password-env CONFLUENCE_SECRET_ENV \
     --enable-bitbucket \
     --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
     --bitbucket-project-key PRJ \
@@ -271,8 +277,12 @@ test_module_validation_and_non_secret_config() {
   # resolving actual secret values at its own runtime -- never the resolved values themselves.
   assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-token"
   assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-password"
+  assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-confluence-password"
   assert_contains "$dir/install/atlassian-mcp-run" "JIRA_USERNAME"
   assert_contains "$dir/install/atlassian-mcp-run" "\${JIRA_SECRET_ENV}"
+  assert_contains "$dir/install/atlassian-mcp-run" "CONFLUENCE_USERNAME"
+  assert_contains "$dir/install/atlassian-mcp-run" "CONFLUENCE_CA_FILE"
+  assert_contains "$dir/install/atlassian-mcp-run" "\${CONFLUENCE_SECRET_ENV:-}"
   assert_contains "$dir/install/atlassian-mcp-run" "\${BITBUCKET_SECRET_ENV}"
   # Codex does not inherit ambient environment for spawned stdio servers, so its config carries the
   # binary directly plus the resolved values (this is the one deliberate exception to the
@@ -282,14 +292,21 @@ test_module_validation_and_non_secret_config() {
   assert_contains "$dir/project/.codex/config.toml" 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
   assert_contains "$dir/project/.codex/config.toml" 'JIRA_USERNAME = "jira-svc"'
   assert_contains "$dir/project/.codex/config.toml" 'JIRA_PASSWORD = "super-secret-password"'
+  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_BASE_URL = "https://confluence.internal.example.com/confluence"'
+  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_CA_FILE = "/etc/ssl/certs/confluence-ca.pem"'
+  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_USERNAME = "confluence-svc"'
+  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_PASSWORD = "super-secret-confluence-password"'
   assert_not_contains "$dir/project/.codex/config.toml" "BITBUCKET_SECRET_ENV"
   assert_not_contains "$dir/project/.codex/config.toml" "JIRA_SECRET_ENV"
+  assert_not_contains "$dir/project/.codex/config.toml" "CONFLUENCE_SECRET_ENV"
   # Claude's config is untouched by any of this and must stay completely secret-free.
   assert_contains "$dir/project/.mcp.json" "\"command\": \"$dir/install/atlassian-mcp-run\""
   assert_not_contains "$dir/project/.mcp.json" "BITBUCKET_SECRET_ENV"
   assert_not_contains "$dir/project/.mcp.json" "JIRA_SECRET_ENV"
+  assert_not_contains "$dir/project/.mcp.json" "CONFLUENCE_SECRET_ENV"
   assert_not_contains "$dir/project/.mcp.json" "super-secret-token"
   assert_not_contains "$dir/project/.mcp.json" "super-secret-password"
+  assert_not_contains "$dir/project/.mcp.json" "super-secret-confluence-password"
 
   local missing="$TMP_ROOT/missing"
   mkdir -p "$missing/home" "$missing/install" "$missing/project"
@@ -370,6 +387,119 @@ test_jira_username_requires_enable_jira_and_password_env() {
     fail "missing Jira password env was not rejected"
   fi
   assert_contains /tmp/installer-jira-missing-password.out "UNSET_JIRA_PASSWORD is required"
+}
+
+test_confluence_username_requires_enable_confluence_and_password_env() {
+  local no_confluence="$TMP_ROOT/confluence-username-without-enable"
+  mkdir -p "$no_confluence/home" "$no_confluence/install" "$no_confluence/project"
+  make_fakes "$no_confluence/bin"
+  if FAKE_LOG="$no_confluence/commands.log" HOME="$no_confluence/home" PATH="$no_confluence/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$no_confluence/install" \
+      --project-dir "$no_confluence/project" \
+      --scope project \
+      --agents none \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --confluence-username confluence-svc \
+      --non-interactive >/tmp/installer-confluence-username-no-enable.out 2>&1; then
+    fail "--confluence-username without --enable-confluence unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-confluence-username-no-enable.out "--confluence-username requires --enable-confluence"
+
+  local missing_password="$TMP_ROOT/confluence-username-missing-password"
+  mkdir -p "$missing_password/home" "$missing_password/install" "$missing_password/project"
+  make_fakes "$missing_password/bin"
+  unset UNSET_CONFLUENCE_PASSWORD
+  if FAKE_LOG="$missing_password/commands.log" HOME="$missing_password/home" PATH="$missing_password/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$missing_password/install" \
+      --project-dir "$missing_password/project" \
+      --scope project \
+      --agents none \
+      --enable-confluence \
+      --confluence-base-url https://confluence.internal.example.com/confluence \
+      --confluence-username confluence-svc \
+      --confluence-password-env UNSET_CONFLUENCE_PASSWORD \
+      --non-interactive >/tmp/installer-confluence-missing-password.out 2>&1; then
+    fail "missing Confluence password env was not rejected"
+  fi
+  assert_contains /tmp/installer-confluence-missing-password.out "UNSET_CONFLUENCE_PASSWORD is required"
+}
+
+test_confluence_wrapper_clears_stale_fixed_env_and_preserves_password_alias() {
+  local disabled="$TMP_ROOT/confluence-disabled-wrapper"
+  mkdir -p "$disabled/home" "$disabled/install" "$disabled/project" "$disabled/bin"
+  make_fakes "$disabled/bin"
+  local disabled_binary="$disabled/fake-atlassian-mcp"
+  cat >"$disabled_binary" <<'FAKE_BINARY'
+#!/usr/bin/env bash
+for name in CONFLUENCE_BASE_URL CONFLUENCE_CA_FILE CONFLUENCE_USERNAME CONFLUENCE_PASSWORD; do
+  if [[ -n "${!name:-}" ]]; then
+    printf '%s=%s\n' "$name" "${!name}"
+  fi
+done
+FAKE_BINARY
+  chmod +x "$disabled_binary"
+  FAKE_LOG="$disabled/commands.log" HOME="$disabled/home" PATH="$disabled/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$disabled_binary" \
+      --install-dir "$disabled/install" \
+      --project-dir "$disabled/project" \
+      --scope project \
+      --agents none \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive
+  local disabled_output
+  disabled_output="$(CONFLUENCE_BASE_URL=stale CONFLUENCE_CA_FILE=stale-ca CONFLUENCE_USERNAME=stale-user CONFLUENCE_PASSWORD=stale-password "$disabled/install/atlassian-mcp-run")"
+  [[ -z "$disabled_output" ]] || fail "disabled Confluence wrapper leaked stale env: $disabled_output"
+
+  local base_only="$TMP_ROOT/confluence-base-only-wrapper"
+  mkdir -p "$base_only/home" "$base_only/install" "$base_only/project" "$base_only/bin"
+  make_fakes "$base_only/bin"
+  local base_binary="$base_only/fake-atlassian-mcp"
+  cp "$disabled_binary" "$base_binary"
+  FAKE_LOG="$base_only/commands.log" HOME="$base_only/home" PATH="$base_only/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$base_binary" \
+      --install-dir "$base_only/install" \
+      --project-dir "$base_only/project" \
+      --scope project \
+      --agents none \
+      --enable-confluence \
+      --confluence-base-url https://confluence.internal.example.com/confluence \
+      --non-interactive
+  local base_output
+  base_output="$(CONFLUENCE_BASE_URL=stale CONFLUENCE_CA_FILE=stale-ca CONFLUENCE_USERNAME=stale-user CONFLUENCE_PASSWORD=stale-password "$base_only/install/atlassian-mcp-run")"
+  [[ "$base_output" == *"CONFLUENCE_BASE_URL=https://confluence.internal.example.com/confluence"* ]] || fail "Confluence base URL was not authoritative: $base_output"
+  [[ "$base_output" != *"CONFLUENCE_CA_FILE="* ]] || fail "omitted Confluence CA leaked through wrapper: $base_output"
+  [[ "$base_output" != *"CONFLUENCE_USERNAME="* ]] || fail "omitted Confluence username leaked through wrapper: $base_output"
+  [[ "$base_output" != *"CONFLUENCE_PASSWORD="* ]] || fail "omitted Confluence password leaked through wrapper: $base_output"
+
+  local alias_case="$TMP_ROOT/confluence-password-alias-wrapper"
+  mkdir -p "$alias_case/home" "$alias_case/install" "$alias_case/project" "$alias_case/bin"
+  make_fakes "$alias_case/bin"
+  local alias_binary="$alias_case/fake-atlassian-mcp"
+  cp "$disabled_binary" "$alias_binary"
+  FAKE_LOG="$alias_case/commands.log" HOME="$alias_case/home" PATH="$alias_case/bin:/usr/bin:/bin" CONFLUENCE_PASSWORD=alias-secret \
+    bash "$INSTALLER" \
+      --binary "$alias_binary" \
+      --install-dir "$alias_case/install" \
+      --project-dir "$alias_case/project" \
+      --scope project \
+      --agents none \
+      --enable-confluence \
+      --confluence-base-url https://confluence.internal.example.com/confluence \
+      --confluence-username confluence-svc \
+      --confluence-password-env CONFLUENCE_PASSWORD \
+      --non-interactive
+  local alias_output
+  alias_output="$(CONFLUENCE_PASSWORD=alias-secret "$alias_case/install/atlassian-mcp-run")"
+  [[ "$alias_output" == *"CONFLUENCE_USERNAME=confluence-svc"* ]] || fail "Confluence username missing with password alias: $alias_output"
+  [[ "$alias_output" == *"CONFLUENCE_PASSWORD=alias-secret"* ]] || fail "Confluence password alias was unset before use: $alias_output"
 }
 
 test_agent_config_escapes_wrapper_path_for_toml_and_json() {
@@ -515,6 +645,8 @@ for test_name in \
   test_module_validation_and_non_secret_config \
   test_non_interactive_bitbucket_requires_token_env_value \
   test_jira_username_requires_enable_jira_and_password_env \
+  test_confluence_username_requires_enable_confluence_and_password_env \
+  test_confluence_wrapper_clears_stale_fixed_env_and_preserves_password_alias \
   test_agent_config_escapes_wrapper_path_for_toml_and_json \
   test_piped_installer_without_agents_fails_without_terminal \
   test_claude_cli_registers_scope_local_and_user \

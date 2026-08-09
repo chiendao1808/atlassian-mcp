@@ -4,14 +4,14 @@ description: Senior solution architect producing implementation and rollout plan
 model: claude-opus-4-8
 effort: high
 permissionMode: dontAsk
-disallowedTools: Edit, Write, NotebookEdit
+disallowedTools: NotebookEdit
 # tools: omitted — inherits the full session tool pool (built-ins + MCP / connector tools),
-#   minus disallowedTools. Writes (Edit/Write/NotebookEdit) are blocked to keep it read-only.
+#   with Edit and Write limited by the shared planner instructions to planning documents in the workspace.
 # Agent is allowed: this agent may spawn OTHER agent types per its instructions. Spawning the
 #   SAME type (self-recursion, where the parent just idles and waits) is blocked by the PreToolUse
 #   hook .claude/hooks/block-recursive-agent.js (wired in .claude/settings.json).
-# permissionMode dontAsk maps Codex approval_policy=never. sandbox (Codex: read-only) has no
-#   per-agent Claude field; Bash is inherited, so shell read-only relies on the agent instructions.
+# permissionMode dontAsk maps Codex approval_policy=never. Claude has no per-agent sandbox;
+#   the shared planner instructions enforce the allowed write path.
 ---
 
 Your full operating instructions for the `planner` agent are maintained in a single shared, tool-agnostic file:

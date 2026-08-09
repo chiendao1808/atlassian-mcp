@@ -38,6 +38,12 @@ Common options:
   --jira-ca-file FILE_PATH
   --jira-username NAME                 optional; requires --enable-jira
   --jira-password-env VARIABLE_NAME    default: JIRA_PASSWORD
+  --enable-confluence
+  --confluence-base-url URL            required with --enable-confluence
+  --confluence-ca-file FILE_PATH
+  --confluence-username NAME           optional; requires --enable-confluence
+  --confluence-password-env VARIABLE_NAME
+                                      default: CONFLUENCE_PASSWORD
   --enable-bitbucket
   --bitbucket-base-url URL             required with --enable-bitbucket
   --bitbucket-project-key KEY          required with --enable-bitbucket
@@ -179,6 +185,12 @@ write_wrapper() {
     echo "#!/usr/bin/env bash"
     echo "set -euo pipefail"
     echo "export ATLASSIAN_TLS_VERIFY=$(shell_quote "$atlassian_tls_verify")"
+    if [[ -n "$confluence_username" ]]; then
+      # Capture before clearing fixed runtime keys so --confluence-password-env=CONFLUENCE_PASSWORD works.
+      echo "confluence_password_value=\"\${${confluence_password_env}:-}\""
+    fi
+    # Confluence is installer-managed here: clear stale fixed runtime values before exporting selected config.
+    echo "unset CONFLUENCE_BASE_URL CONFLUENCE_CA_FILE CONFLUENCE_USERNAME CONFLUENCE_PASSWORD"
     [[ "$enable_jira" == "yes" ]] && echo "export JIRA_BASE_URL=$(shell_quote "$jira_base_url")"
     [[ -n "$jira_ca_file" ]] && echo "export JIRA_CA_FILE=$(shell_quote "$jira_ca_file")"
     if [[ -n "$jira_username" ]]; then
@@ -189,6 +201,17 @@ write_wrapper() {
       echo "  exit 1"
       echo "fi"
       echo "export JIRA_PASSWORD=\"\${${jira_password_env}}\""
+    fi
+    [[ "$enable_confluence" == "yes" ]] && echo "export CONFLUENCE_BASE_URL=$(shell_quote "$confluence_base_url")"
+    [[ -n "$confluence_ca_file" ]] && echo "export CONFLUENCE_CA_FILE=$(shell_quote "$confluence_ca_file")"
+    if [[ -n "$confluence_username" ]]; then
+      echo "export CONFLUENCE_USERNAME=$(shell_quote "$confluence_username")"
+      # The password stays in the caller's environment; the wrapper only maps the configured variable name.
+      echo "if [[ -z \"\$confluence_password_value\" ]]; then"
+      echo "  echo \"CONFLUENCE password environment variable ${confluence_password_env} is not set\" >&2"
+      echo "  exit 1"
+      echo "fi"
+      echo "export CONFLUENCE_PASSWORD=\"\$confluence_password_value\""
     fi
     if [[ "$enable_bitbucket" == "yes" ]]; then
       echo "export BITBUCKET_BASE_URL=$(shell_quote "$bitbucket_base_url")"
@@ -212,7 +235,7 @@ write_wrapper() {
 # own ambient environment through to spawned stdio servers (confirmed from Codex's own logs: the
 # binary started with every module disabled even with the wrapper script, which itself resolves
 # BITBUCKET_TOKEN_ENV-style indirection only from whatever environment the spawning process gives
-# it -- Codex gives it none). Callers must have already validated that a resolved bitbucket/jira
+# it -- Codex gives it none). Callers must have already validated that each resolved
 # secret is available before calling this; see the top-level validation block.
 codex_env_lines() {
   echo "ATLASSIAN_TLS_VERIFY = \"$(toml_string "$atlassian_tls_verify")\""
@@ -223,6 +246,14 @@ codex_env_lines() {
   if [[ -n "$jira_username" ]]; then
     echo "JIRA_USERNAME = \"$(toml_string "$jira_username")\""
     echo "JIRA_PASSWORD = \"$(toml_string "${!jira_password_env}")\""
+  fi
+  if [[ "$enable_confluence" == "yes" ]]; then
+    echo "CONFLUENCE_BASE_URL = \"$(toml_string "$confluence_base_url")\""
+  fi
+  [[ -n "$confluence_ca_file" ]] && echo "CONFLUENCE_CA_FILE = \"$(toml_string "$confluence_ca_file")\""
+  if [[ -n "$confluence_username" ]]; then
+    echo "CONFLUENCE_USERNAME = \"$(toml_string "$confluence_username")\""
+    echo "CONFLUENCE_PASSWORD = \"$(toml_string "${!confluence_password_env}")\""
   fi
   if [[ "$enable_bitbucket" == "yes" ]]; then
     echo "BITBUCKET_BASE_URL = \"$(toml_string "$bitbucket_base_url")\""
@@ -236,8 +267,8 @@ codex_env_lines() {
 # Replaces only the installer-managed Codex block, preserving unrelated TOML around it. Command is
 # always the built binary, not the wrapper -- see codex_env_lines for why Codex needs resolved
 # values written directly into its config instead of relying on the wrapper's runtime indirection.
-# This does put the Bitbucket token and, if configured, the Jira password in Codex's config file,
-# unlike Claude's; that is a deliberate, Codex-specific exception, not a general policy change.
+# This does put the Bitbucket token and, if configured, Jira/Confluence passwords in Codex's
+# config file, unlike Claude's; that is a deliberate, Codex-specific exception, not a general policy change.
 managed_codex_config() {
   local path="$1"
   local command="$2"
@@ -408,6 +439,11 @@ jira_base_url=""
 jira_ca_file=""
 jira_username=""
 jira_password_env="JIRA_PASSWORD"
+enable_confluence="no"
+confluence_base_url=""
+confluence_ca_file=""
+confluence_username=""
+confluence_password_env="CONFLUENCE_PASSWORD"
 enable_bitbucket="no"
 bitbucket_base_url=""
 bitbucket_project_key=""
@@ -436,6 +472,11 @@ while [[ $# -gt 0 ]]; do
     --jira-ca-file) jira_ca_file="${2:-}"; shift 2 ;;
     --jira-username) jira_username="${2:-}"; shift 2 ;;
     --jira-password-env) jira_password_env="${2:-}"; shift 2 ;;
+    --enable-confluence) enable_confluence="yes"; shift ;;
+    --confluence-base-url) confluence_base_url="${2:-}"; shift 2 ;;
+    --confluence-ca-file) confluence_ca_file="${2:-}"; shift 2 ;;
+    --confluence-username) confluence_username="${2:-}"; shift 2 ;;
+    --confluence-password-env) confluence_password_env="${2:-}"; shift 2 ;;
     --enable-bitbucket) enable_bitbucket="yes"; shift ;;
     --bitbucket-base-url) bitbucket_base_url="${2:-}"; shift 2 ;;
     --bitbucket-project-key) bitbucket_project_key="${2:-}"; shift 2 ;;
@@ -463,7 +504,7 @@ if [[ -z "$agents" ]]; then
   prompt_agents
 fi
 [[ "$agents" == "claude" || "$agents" == "codex" || "$agents" == "both" || "$agents" == "none" ]] || die "--agents must be claude, codex, both, or none"
-[[ "$enable_jira" == "yes" || "$enable_bitbucket" == "yes" ]] || die "select at least one module with --enable-jira or --enable-bitbucket"
+[[ "$enable_jira" == "yes" || "$enable_confluence" == "yes" || "$enable_bitbucket" == "yes" ]] || die "select at least one module with --enable-jira, --enable-confluence, or --enable-bitbucket"
 [[ "$atlassian_tls_verify" == "true" || "$atlassian_tls_verify" == "false" ]] || die "--atlassian-tls-verify must be true or false"
 
 if [[ "$enable_jira" == "yes" ]]; then
@@ -478,6 +519,18 @@ if [[ -n "$jira_username" ]]; then
   # used for Claude/manual runs, which resolves --jira-password-env only at its own runtime -- so
   # Codex needs it available now regardless of --non-interactive.
   [[ "$agents" != "codex" && "$agents" != "both" || -n "${!jira_password_env:-}" ]] || die "$jira_password_env is required to configure Codex when --jira-username is set"
+fi
+if [[ "$enable_confluence" == "yes" ]]; then
+  [[ -n "$confluence_base_url" ]] || die "--confluence-base-url is required with --enable-confluence"
+  require_url "--confluence-base-url" "$confluence_base_url"
+fi
+if [[ -n "$confluence_username" ]]; then
+  [[ "$enable_confluence" == "yes" ]] || die "--confluence-username requires --enable-confluence"
+  validate_token_env_name "--confluence-password-env" "$confluence_password_env"
+  [[ "$non_interactive" != "yes" || -n "${!confluence_password_env:-}" ]] || die "$confluence_password_env is required for non-interactive installs when --confluence-username is set"
+  # Codex's config carries the resolved password directly (see codex_env_lines), unlike the wrapper
+  # used for Claude/manual runs, which resolves --confluence-password-env only at its own runtime.
+  [[ "$agents" != "codex" && "$agents" != "both" || -n "${!confluence_password_env:-}" ]] || die "$confluence_password_env is required to configure Codex when --confluence-username is set"
 fi
 if [[ "$enable_bitbucket" == "yes" ]]; then
   [[ -n "$bitbucket_base_url" ]] || die "--bitbucket-base-url is required with --enable-bitbucket"

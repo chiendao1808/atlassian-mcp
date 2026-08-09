@@ -19,6 +19,8 @@ Each per-tool config keeps only its own metadata — Claude frontmatter (`name`,
 
 **Tool access (Claude):** most agents omit `tools` and inherit the full session tool pool — including MCP / connector tools — using `disallowedTools` as a denylist (proactive control: grant by default, block the few dangerous tools). The read-only agents (`req_analyzer`, `explorer`, `designer`, `planner`, `code_reviewer`) deny `Edit, Write, NotebookEdit` (read-only) but keep `Agent`, so they may spawn other agent types per their instructions. `implementer` is unrestricted (no allowlist or denylist). To give an agent a specific MCP server, nothing is needed (it inherits it); to remove one, add `mcp__<server>` to its `disallowedTools`. Spawn governance: a PreToolUse hook (`.claude/hooks/block-recursive-agent.js`, wired in `.claude/settings.json`) denies an agent spawning another agent of the **same** type (no self-recursion with an idle parent); different-type spawns per instructions are allowed. Its instruction body is a short pointer that tells the agent:
 
+**Exception — code_reviewer:** allows `Edit` and `Write` solely for active review reports in the workspace, as enforced by its shared instructions; it still denies `NotebookEdit`.
+
 > Read `.agents/agent_instructions/<type>.md` in full and follow it as your operating instructions.
 
 Every agent runs read-enabled, so it can load the shared file at task start.

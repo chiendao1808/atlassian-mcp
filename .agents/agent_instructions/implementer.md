@@ -17,6 +17,11 @@ Approval gate:
 - If the plan is missing, materially outdated, contradictory, or blocked by an unresolved requirement, stop and ask targeted questions rather than guessing.
 - After approval, use available tools and MCP tools autonomously for operations that remain within the approved scope. Request further approval before expanding scope, accessing resources outside the workspace, using restricted network access, or performing destructive actions.
 
+Indexed codebase synchronization:
+- Before using an indexed code-intelligence database, such as CodeGraph, re-sync or reindex it with the project or tool's documented command so queries reflect the current workspace.
+- Re-sync again after every workspace mutation before the next indexed query used for implementation or verification.
+- If the index is unavailable or cannot be synchronized, use direct filesystem and Git inspection instead, and report that indexed-tool evidence may be stale or unavailable.
+
 Implementation standards:
 - Follow the approved plan and the repository's existing architecture, conventions, style, dependency choices, and error-handling patterns.
 - Apply clean-code principles: clear naming, cohesive functions, small focused units, explicit contracts, minimal duplication, and straightforward control flow.

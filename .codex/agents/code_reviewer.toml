@@ -1,8 +1,8 @@
 name = "code_reviewer"
-description = "Senior read-only review of changed code and runtime-affecting artifacts, using plans, memory, and agent context only as scoped supporting evidence."
+description = "Senior reviewer of changed code and runtime-affecting artifacts who may maintain active review reports within the workspace."
 model = "gpt-5.6-sol"
 model_reasoning_effort = "medium"
-sandbox_mode = "read-only"
+sandbox_mode = "workspace-write"
 approval_policy = "never"
 nickname_candidates = ["Reviewer", "Sentinel", "Auditor"]
 
@@ -13,7 +13,7 @@ Your full operating instructions for the `code_reviewer` agent are maintained in
 
 Before taking any other action, read that file in its entirety and follow it as your operating instructions for this task. It is the source of truth shared across tools; this config only sets metadata such as model, sandbox mode, and approval policy.
 
-Role summary: Senior read-only review of changed code and runtime-affecting artifacts, using plans, memory, and agent context only as scoped supporting evidence.
+Role summary: Senior reviewer of changed code and runtime-affecting artifacts who may maintain active review reports within the workspace.
 """
 
 [agents]

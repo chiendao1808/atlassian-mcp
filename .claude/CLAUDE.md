@@ -67,7 +67,7 @@ Workspace-write. Model: sonnet.
 
 ### `code_reviewer`
 
-Reviews the current Git changes and returns actionable findings without modifying the workspace.
+Reviews the current Git changes and may create or update active review reports in the workspace.
 
 - Review staged, unstaged, and relevant untracked changes.
 - Prioritize changed source code, tests, configuration, schemas, migrations, and build/deployment files.
@@ -77,7 +77,7 @@ Reviews the current Git changes and returns actionable findings without modifyin
 - Identify correctness, compatibility, security, performance, concurrency, data, integration, side-effect, and documentation risks.
 - Report each issue with severity, description, file/line position, impact, evidence, and suggested fix.
 
-Read-only. Model: opus.
+May create or update active review reports only in the workspace. Model: opus.
 
 ## Skills
 

@@ -34,23 +34,6 @@ type AuthenticateInput struct {
 	Password string `json:"password,omitempty" jsonschema:"Sensitive Confluence password; falls back to CONFLUENCE_PASSWORD if omitted"`
 }
 
-// SearchContentInput selects Confluence content with raw CQL and optional passthrough expansions.
-type SearchContentInput struct {
-	CQL        string `json:"cql" jsonschema:"Raw Confluence CQL query (required)"`
-	CQLContext string `json:"cqlcontext,omitempty" jsonschema:"Optional Confluence cqlcontext query value"`
-	Expand     string `json:"expand,omitempty" jsonschema:"Optional comma-separated Confluence expand value"`
-	Start      *int   `json:"start,omitempty" jsonschema:"Optional non-negative start offset"`
-	Limit      *int   `json:"limit,omitempty" jsonschema:"Optional positive limit; defaults to 25 when omitted"`
-}
-
-// GetContentInput selects one Confluence content item and optional native query parameters.
-type GetContentInput struct {
-	ContentID string `json:"contentId" jsonschema:"Confluence content ID (required)"`
-	Status    string `json:"status,omitempty" jsonschema:"Optional Confluence content status"`
-	Version   *int   `json:"version,omitempty" jsonschema:"Optional positive content version"`
-	Expand    string `json:"expand,omitempty" jsonschema:"Optional comma-separated Confluence expand value, e.g. body.storage,body.view"`
-}
-
 // Authenticate verifies candidate credentials with /user/current before replacing the session.
 func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) result.Envelope {
 	return s.authenticate(ctx, input, func(candidate auth.Credential) bool {
@@ -90,54 +73,6 @@ func (s *Service) authenticate(ctx context.Context, input AuthenticateInput, com
 	return result.OK("confluence", "confluence_authenticate", map[string]any{"user": observability.Redact(user)})
 }
 
-// SearchContent runs a raw CQL content search after authentication.
-func (s *Service) SearchContent(ctx context.Context, input SearchContentInput) result.Envelope {
-	cred, errEnv := s.requireCredential("confluence_search_content")
-	if errEnv != nil {
-		return *errEnv
-	}
-	if strings.TrimSpace(input.CQL) == "" {
-		return result.Fail("confluence", "confluence_search_content", "VALIDATION_ERROR", "cql is required")
-	}
-	if input.Start != nil && *input.Start < 0 {
-		return result.Fail("confluence", "confluence_search_content", "VALIDATION_ERROR", "start must be non-negative")
-	}
-	if input.Limit != nil && *input.Limit <= 0 {
-		return result.Fail("confluence", "confluence_search_content", "VALIDATION_ERROR", "limit must be positive")
-	}
-	limit := 25
-	if input.Limit != nil {
-		limit = *input.Limit
-	}
-	var out map[string]any
-	if err := s.client.GetJSON(ctx, cred, "/content/search", q("cql", input.CQL, "cqlcontext", input.CQLContext, "expand", input.Expand).int("start", input.Start).intValue("limit", limit), &out); err != nil {
-		return confluenceClientError("confluence_search_content", "", err)
-	}
-	return result.OK("confluence", "confluence_search_content", observability.Redact(out))
-}
-
-// GetContent retrieves one Confluence content item by ID after authentication.
-func (s *Service) GetContent(ctx context.Context, input GetContentInput) result.Envelope {
-	cred, errEnv := s.requireCredential("confluence_get_content")
-	if errEnv != nil {
-		return *errEnv
-	}
-	contentID, invalid := cleanPathSegment("confluence_get_content", "contentId", input.ContentID)
-	if invalid != nil {
-		return *invalid
-	}
-	if input.Version != nil && *input.Version <= 0 {
-		return result.Fail("confluence", "confluence_get_content", "VALIDATION_ERROR", "version must be positive")
-	}
-	query := q("status", input.Status, "expand", input.Expand)
-	query = query.int("version", input.Version)
-	var out map[string]any
-	if err := s.client.GetJSON(ctx, cred, "/content/"+contentID, query, &out); err != nil {
-		return confluenceClientError("confluence_get_content", "", err)
-	}
-	return result.OK("confluence", "confluence_get_content", observability.Redact(out))
-}
-
 // requireCredential blocks read tools before confluence_authenticate and sends no network request.
 func (s *Service) requireCredential(tool string) (auth.Credential, *result.Envelope) {
 	cred, err := s.store.Snapshot()
@@ -152,6 +87,23 @@ func (s *Service) requireCredential(tool string) (auth.Credential, *result.Envel
 	return cred, nil
 }
 
+// validatedPage enforces the common Confluence collection paging contract.
+func validatedPage(tool string, start, limit *int, defaultLimit int) (int, *result.Envelope) {
+	if start != nil && *start < 0 {
+		env := result.Fail("confluence", tool, "VALIDATION_ERROR", "start must be non-negative")
+		return 0, &env
+	}
+	if limit != nil && *limit <= 0 {
+		env := result.Fail("confluence", tool, "VALIDATION_ERROR", "limit must be positive")
+		return 0, &env
+	}
+	if limit != nil {
+		return *limit, nil
+	}
+	return defaultLimit, nil
+}
+
+// cleanPathSegment keeps caller-supplied IDs and keys to exactly one URL segment.
 func cleanPathSegment(tool, field, value string) (string, *result.Envelope) {
 	id := strings.TrimSpace(value)
 	if id == "" {

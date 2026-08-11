@@ -303,6 +303,9 @@ responses must not be placed in the workflow, release assets, or public logs.
   invoking PSScriptAnalyzer separately for the two fixed PowerShell paths,
   collecting all error-severity diagnostics, printing them, and failing only
   when the collected count is non-zero.
+- [x] Fix the hosted Syft download failure by changing the shared
+  `SYFT_VERSION` workflow env from `1.29.0` to the existing release tag
+  `v1.29.0`, which feeds both current `download-syft` call sites.
 - [ ] Record automated job URLs and external evidence links in **Validation**
   and **Result**. Keep the plan active if a first tagged release has not yet
   passed all gates.
@@ -383,7 +386,7 @@ responses must not be placed in the workflow, release assets, or public logs.
   a repository `LICENSE` file.
 - 2026-08-11: Pin GitHub Actions steps to resolved action commit IDs with
   version comments; release tools are pinned through GoReleaser `v2.17.1` and
-  Syft `1.29.0`.
+  Syft `v1.29.0`.
 - 2026-08-11: Stage snapshot assets from GoReleaser `artifacts.json` before
   uploading the Actions artifact because local binary archive paths stay under
   target directories while release upload names are flattened.
@@ -406,6 +409,11 @@ responses must not be placed in the workflow, release assets, or public logs.
 - 2026-08-11: ShellCheck SC2126 rejects the Bash installer's test-only
   `grep | wc -l` count pipeline; `grep -F -c` is the canonical count form, with
   explicit no-match normalization because `grep` exits 1 after printing zero.
+- 2026-08-11: The pinned `download-syft` action constructs the Syft release URL
+  from the supplied version string; the hosted failure requested
+  `https://github.com/anchore/syft/releases/1.29.0` and received 404. The
+  verified Syft release is tagged `v1.29.0`, so the workflow env must include
+  the leading `v`.
 - 2026-08-11: Snapshot staging is allowed only after the complete GoReleaser
   `artifacts.json` manifest matches the approved release shape: `Metadata`
   `metadata.json` (`internal_type` 35), build-only `Binary` records for
@@ -541,6 +549,19 @@ Local validation on Windows:
 - `goreleaser check` passed after the GitHub Actions follow-up fixes.
 - `git diff --check` passed after the GitHub Actions follow-up fixes with
   line-ending warnings only for the edited workflow, plan, and Bash test files.
+- The Syft download root cause came from a hosted GitHub Actions log: the
+  pinned `anchore/sbom-action/download-syft` action received `1.29.0`,
+  requested `https://github.com/anchore/syft/releases/1.29.0`, and received
+  404. The release exists as tag `v1.29.0` (published 2025-07-21), so the
+  workflow now sets `SYFT_VERSION: "v1.29.0"` for both existing download
+  call sites. A hosted snapshot/release run must prove the actual download.
+- Static workflow validation passed: `.github/workflows/release.yml` contains
+  `SYFT_VERSION: "v1.29.0"`, contains no old `SYFT_VERSION: "1.29.0"` value,
+  and has exactly two `syft-version: ${{ env.SYFT_VERSION }}` references across
+  exactly two `download-syft` action call sites.
+- `goreleaser check` passed after the Syft tag fix.
+- `git diff --check` passed after the Syft tag fix with line-ending warnings
+  only for the edited workflow and plan files.
 
 Local limitations and remaining proof:
 
@@ -553,8 +574,9 @@ Local limitations and remaining proof:
   prove the PSScriptAnalyzer 1.24.0 `-Path` invocation is resolved.
 - Syft is not installed locally, and `go install` of Syft `v1.29.0` plus
   GoReleaser `v2.17.1` timed out after five minutes. Real Syft SBOM content
-  generation and parsing remain GitHub-hosted CI proof; local fake-Syft proof
-  covered only GoReleaser SBOM selection and naming.
+  generation, download through `download-syft`, and parsing remain
+  GitHub-hosted CI proof; local fake-Syft proof covered only GoReleaser SBOM
+  selection and naming.
 - Linux raw binary execution, Debian control/file-list inspection, and Debian
   install proof remain GitHub-hosted Ubuntu proof.
 - Draft-release asset download, protected release publication, Claude Code,

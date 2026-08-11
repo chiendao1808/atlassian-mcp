@@ -36,6 +36,12 @@ func Definitions() []*mcp.Tool {
 		{Name: "jira_vote_issue", Description: "Add the authenticated user's vote to a Jira issue. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
 		{Name: "jira_unvote_issue", Description: "Remove the authenticated user's vote from a Jira issue. Requires jira_authenticate first and client approval; this is an irreversible write.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, OpenWorldHint: &open}},
 		{Name: "jira_create_issue_link", Description: "Create a native Jira issue link between two issues. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_create_component", Description: "Create a Jira project Component using projectKey mapped to Jira body field project. Requires jira_authenticate first and client approval.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &additive, OpenWorldHint: &open}},
+		{Name: "jira_get_component", Description: "Read one Jira Component by componentId. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &additive, IdempotentHint: true, OpenWorldHint: &open}},
+		{Name: "jira_update_component", Description: "Partially update one Jira Component. Requires jira_authenticate first and client approval; this may rename or clear Component metadata.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, IdempotentHint: true, OpenWorldHint: &open}},
+		{Name: "jira_delete_component", Description: "Delete one Jira Component, optionally moving affected issues to another Component. Requires jira_authenticate first and client approval; this is destructive.", Annotations: &mcp.ToolAnnotations{DestructiveHint: &destructive, IdempotentHint: true, OpenWorldHint: &open}},
+		{Name: "jira_get_component_issue_count", Description: "Read Jira's related issue count for one Component. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &additive, IdempotentHint: true, OpenWorldHint: &open}},
+		{Name: "jira_list_project_components", Description: "List Jira Components for one project ID or key. Requires jira_authenticate first.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &additive, IdempotentHint: true, OpenWorldHint: &open}},
 	}
 }
 
@@ -115,5 +121,23 @@ func (s *Service) Register(server *mcp.Server) {
 	})
 	mcp.AddTool(server, defs[23], func(ctx context.Context, req *mcp.CallToolRequest, input CreateIssueLinkInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.CreateIssueLink(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[24], func(ctx context.Context, req *mcp.CallToolRequest, input CreateComponentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.CreateComponent(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[25], func(ctx context.Context, req *mcp.CallToolRequest, input GetComponentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.GetComponent(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[26], func(ctx context.Context, req *mcp.CallToolRequest, input UpdateComponentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.UpdateComponent(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[27], func(ctx context.Context, req *mcp.CallToolRequest, input DeleteComponentInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.DeleteComponent(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[28], func(ctx context.Context, req *mcp.CallToolRequest, input GetComponentIssueCountInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.GetComponentIssueCount(ctx, input), nil
+	})
+	mcp.AddTool(server, defs[29], func(ctx context.Context, req *mcp.CallToolRequest, input ListProjectComponentsInput) (*mcp.CallToolResult, result.Envelope, error) {
+		return nil, s.ListProjectComponents(ctx, input), nil
 	})
 }

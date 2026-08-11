@@ -7,12 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/chiendao1808/atlassian-mcp/internal/auth"
 	"github.com/chiendao1808/atlassian-mcp/internal/jira/client"
 	"github.com/chiendao1808/atlassian-mcp/internal/observability"
+	"github.com/chiendao1808/atlassian-mcp/internal/result"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func basicAuthValue(username, password string) string {
@@ -27,6 +30,113 @@ func newTestServiceWithEnv(baseURL string, hc *http.Client, env map[string]strin
 	store := auth.NewSessionStore()
 	getenv := func(key string) string { return env[key] }
 	return NewService(client.New(baseURL, hc, 1<<20), store, getenv)
+}
+
+func strPtr(v string) *string { return &v }
+
+type requestRoute struct {
+	method string
+	path   string
+}
+
+// newMCPJiraTestClient exposes Jira tools through the real SDK registration path for schema tests.
+func newMCPJiraTestClient(t *testing.T, svc *Service) *mcp.ClientSession {
+	t.Helper()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-jira-server", Version: "v0"}, nil)
+	svc.Register(server)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-jira-client", Version: "v0"}, nil)
+	clientSession, err := client.Connect(t.Context(), clientTransport, nil)
+	if err != nil {
+		_ = serverSession.Close()
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = clientSession.Close()
+		if err := serverSession.Wait(); err != nil {
+			t.Fatalf("server session wait: %v", err)
+		}
+	})
+	return clientSession
+}
+
+// requireSchemaMap normalizes SDK schema values to maps for focused registration assertions.
+func requireSchemaMap(t *testing.T, schema any) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal schema %s: %v", string(data), err)
+	}
+	return out
+}
+
+func requireSchemaProperties(t *testing.T, schema map[string]any, names ...string) {
+	t.Helper()
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties=%#v", schema["properties"])
+	}
+	for _, name := range names {
+		if _, ok := props[name]; !ok {
+			t.Fatalf("schema missing property %q in %#v", name, props)
+		}
+	}
+}
+
+func forbidSchemaProperties(t *testing.T, schema map[string]any, names ...string) {
+	t.Helper()
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties=%#v", schema["properties"])
+	}
+	for _, name := range names {
+		if _, ok := props[name]; ok {
+			t.Fatalf("schema should not expose property %q in %#v", name, props)
+		}
+	}
+}
+
+func requireSchemaRequired(t *testing.T, schema map[string]any, want []string) {
+	t.Helper()
+	var got []string
+	if raw, ok := schema["required"].([]any); ok {
+		for _, item := range raw {
+			got = append(got, item.(string))
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("required=%v, want %v", got, want)
+	}
+}
+
+func callJiraMCPEnvelope(t *testing.T, client *mcp.ClientSession, name string, args map[string]any) result.Envelope {
+	t.Helper()
+	res, err := client.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s protocol error: %v", name, err)
+	}
+	if res.IsError {
+		t.Fatalf("%s tool error: %#v", name, res.Content)
+	}
+	data, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("%s marshal structured content: %v", name, err)
+	}
+	var out result.Envelope
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("%s unmarshal envelope %s: %v", name, string(data), err)
+	}
+	return out
 }
 
 func TestGetIssueRejectsPathSeparatorWithoutNetwork(t *testing.T) {
@@ -2360,10 +2470,825 @@ func TestCreateIssueLinkPostsToIssueLinkPathOutsideIssueTree(t *testing.T) {
 	}
 }
 
+func TestComponentToolsPreAuthSendNoNetworkRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Service) result.Envelope
+	}{
+		{name: "create", call: func(s *Service) result.Envelope {
+			return s.CreateComponent(context.Background(), CreateComponentInput{ProjectKey: "PROJ", Name: "Backend"})
+		}},
+		{name: "get", call: func(s *Service) result.Envelope {
+			return s.GetComponent(context.Background(), GetComponentInput{ComponentID: "10010"})
+		}},
+		{name: "update", call: func(s *Service) result.Envelope {
+			return s.UpdateComponent(context.Background(), UpdateComponentInput{ComponentID: "10010", Name: strPtr("API")})
+		}},
+		{name: "delete", call: func(s *Service) result.Envelope {
+			return s.DeleteComponent(context.Background(), DeleteComponentInput{ComponentID: "10010"})
+		}},
+		{name: "issue count", call: func(s *Service) result.Envelope {
+			return s.GetComponentIssueCount(context.Background(), GetComponentIssueCountInput{ComponentID: "10010"})
+		}},
+		{name: "project list", call: func(s *Service) result.Envelope {
+			return s.ListProjectComponents(context.Background(), ListProjectComponentsInput{ProjectIDOrKey: "PROJ"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				calls++
+			}))
+			t.Cleanup(server.Close)
+
+			out := tc.call(newTestService(server.URL, server.Client()))
+			if out.Success || out.Error == nil || out.Error.Code != "JIRA_NOT_AUTHENTICATED" {
+				t.Fatalf("out=%+v", out)
+			}
+			if calls != 0 {
+				t.Fatalf("pre-auth sent %d requests", calls)
+			}
+		})
+	}
+}
+
+func TestCreateComponentPostsProjectKeyAsProjectAndReturnsRedactedComponent(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/rest/api/2/component" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if len(r.URL.Query()) != 0 {
+			t.Fatalf("create component should not send query parameters: %s", r.URL.String())
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":       "10010",
+			"name":     "Backend",
+			"project":  "PROJ",
+			"password": "component-secret",
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.CreateComponent(context.Background(), CreateComponentInput{
+		ProjectKey:   " PROJ ",
+		Name:         " Backend ",
+		Description:  "Backend services",
+		LeadUserName: "alice",
+		AssigneeType: "UNASSIGNED",
+	})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	wantBody := map[string]any{
+		"project":      " PROJ ",
+		"name":         " Backend ",
+		"description":  "Backend services",
+		"leadUserName": "alice",
+		"assigneeType": "UNASSIGNED",
+	}
+	if !reflect.DeepEqual(gotBody, wantBody) {
+		t.Fatalf("body=%+v, want %+v", gotBody, wantBody)
+	}
+	if _, ok := gotBody["projectKey"]; ok {
+		t.Fatalf("body must not send projectKey: %+v", gotBody)
+	}
+	if _, ok := gotBody["projectId"]; ok {
+		t.Fatalf("body must not send projectId: %+v", gotBody)
+	}
+	data, ok := out.Data.(map[string]any)
+	if !ok || data["id"] != "10010" || data["name"] != "Backend" {
+		t.Fatalf("data=%#v", out.Data)
+	}
+	raw, _ := json.Marshal(out)
+	if strings.Contains(strings.ToLower(string(raw)), "component-secret") {
+		t.Fatalf("component result leaked sentinel secret: %s", string(raw))
+	}
+}
+
+func TestCreateComponentRejectsBlankRequiredFieldsWithoutNetwork(t *testing.T) {
+	cases := []CreateComponentInput{
+		{ProjectKey: " ", Name: "Backend"},
+		{ProjectKey: "PROJ", Name: " "},
+	}
+	for _, input := range cases {
+		calls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			calls++
+		}))
+		t.Cleanup(server.Close)
+
+		svc := newTestService(server.URL, server.Client())
+		svc.Store().Replace(auth.NewCredential("alice", "secret"))
+		out := svc.CreateComponent(context.Background(), input)
+		if out.Success || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+			t.Fatalf("input=%+v out=%+v", input, out)
+		}
+		if calls != 0 {
+			t.Fatalf("invalid create input sent %d requests", calls)
+		}
+	}
+}
+
+func TestGetComponentGetsExactPathAndReturnsComponent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/component/10010" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "10010", "name": "Backend"})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.GetComponent(context.Background(), GetComponentInput{ComponentID: "10010"})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	data, ok := out.Data.(map[string]any)
+	if !ok || data["id"] != "10010" || data["name"] != "Backend" {
+		t.Fatalf("data=%#v", out.Data)
+	}
+}
+
+func TestComponentPathValidationRejectsUnsafeSegmentsWithoutNetwork(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Service) result.Envelope
+	}{
+		{name: "get component", call: func(s *Service) result.Envelope {
+			return s.GetComponent(context.Background(), GetComponentInput{ComponentID: "10/010"})
+		}},
+		{name: "update component", call: func(s *Service) result.Envelope {
+			return s.UpdateComponent(context.Background(), UpdateComponentInput{ComponentID: "10?010", Name: strPtr("Backend")})
+		}},
+		{name: "delete component", call: func(s *Service) result.Envelope {
+			return s.DeleteComponent(context.Background(), DeleteComponentInput{ComponentID: "10#010"})
+		}},
+		{name: "delete replacement", call: func(s *Service) result.Envelope {
+			return s.DeleteComponent(context.Background(), DeleteComponentInput{ComponentID: "10010", MoveIssuesTo: strPtr("10/011")})
+		}},
+		{name: "issue count", call: func(s *Service) result.Envelope {
+			return s.GetComponentIssueCount(context.Background(), GetComponentIssueCountInput{ComponentID: "10\\010"})
+		}},
+		{name: "project list", call: func(s *Service) result.Envelope {
+			return s.ListProjectComponents(context.Background(), ListProjectComponentsInput{ProjectIDOrKey: "PROJ/DEV"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				calls++
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			out := tc.call(svc)
+			if out.Success || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+				t.Fatalf("out=%+v", out)
+			}
+			if calls != 0 {
+				t.Fatalf("invalid path segment sent %d requests", calls)
+			}
+		})
+	}
+}
+
+func TestUpdateComponentPreservesOmittedAndExplicitEmptyFields(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/rest/api/2/component/10010" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "10010", "description": "", "leadUserName": ""})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.UpdateComponent(context.Background(), UpdateComponentInput{
+		ComponentID:  "10010",
+		Description:  strPtr(""),
+		LeadUserName: strPtr(""),
+	})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	wantBody := map[string]any{"description": "", "leadUserName": ""}
+	if !reflect.DeepEqual(gotBody, wantBody) {
+		t.Fatalf("body=%+v, want %+v", gotBody, wantBody)
+	}
+	if _, ok := gotBody["name"]; ok {
+		t.Fatalf("omitted name should not be sent: %+v", gotBody)
+	}
+	data, ok := out.Data.(map[string]any)
+	if !ok || data["id"] != "10010" {
+		t.Fatalf("data=%#v", out.Data)
+	}
+}
+
+func TestUpdateComponentAcceptsEmptyAndJSONSuccessBodies(t *testing.T) {
+	cases := []struct {
+		name     string
+		response func(http.ResponseWriter)
+		wantData func(t *testing.T, data any)
+	}{
+		{
+			name: "empty 200",
+			response: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusOK)
+			},
+			wantData: func(t *testing.T, data any) {
+				got, ok := data.(map[string]any)
+				if !ok || got["mutationApplied"] != true {
+					t.Fatalf("data=%#v", data)
+				}
+			},
+		},
+		{
+			name: "json 200",
+			response: func(w http.ResponseWriter) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "10010", "name": "API"})
+			},
+			wantData: func(t *testing.T, data any) {
+				got, ok := data.(map[string]any)
+				if !ok || got["id"] != "10010" || got["name"] != "API" {
+					t.Fatalf("data=%#v", data)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			puts := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/rest/api/2/component/10010" {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+				puts++
+				tc.response(w)
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			out := svc.UpdateComponent(context.Background(), UpdateComponentInput{ComponentID: "10010", Name: strPtr("API")})
+			if !out.Success || puts != 1 {
+				t.Fatalf("out=%+v puts=%d", out, puts)
+			}
+			tc.wantData(t, out.Data)
+		})
+	}
+}
+
+func TestUpdateComponentRequiresAtLeastOneFieldWithoutNetwork(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.UpdateComponent(context.Background(), UpdateComponentInput{ComponentID: "10010"})
+	if out.Success || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+		t.Fatalf("out=%+v", out)
+	}
+	if calls != 0 {
+		t.Fatalf("empty update sent %d requests", calls)
+	}
+}
+
+func TestUpdateComponentRejectsMalformedJSONSuccessBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/rest/api/2/component/10010" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{`))
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	out := svc.UpdateComponent(context.Background(), UpdateComponentInput{ComponentID: "10010", Name: strPtr("API")})
+	if out.Success || out.Error == nil || out.Error.Code != "UPSTREAM_SERVER_ERROR" {
+		t.Fatalf("out=%+v", out)
+	}
+}
+
+func TestDeleteComponentSendsOptionalMoveIssuesToOnce(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     DeleteComponentInput
+		wantQuery string
+	}{
+		{name: "no replacement", input: DeleteComponentInput{ComponentID: "10010"}},
+		{name: "replacement", input: DeleteComponentInput{ComponentID: "10010", MoveIssuesTo: strPtr("10011")}, wantQuery: "10011"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deletes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/rest/api/2/component/10010" {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+				deletes++
+				if got := r.URL.Query().Get("moveIssuesTo"); got != tc.wantQuery {
+					t.Fatalf("moveIssuesTo=%q, want %q in %s", got, tc.wantQuery, r.URL.String())
+				}
+				if tc.wantQuery == "" && len(r.URL.Query()) != 0 {
+					t.Fatalf("delete without replacement should not send query: %s", r.URL.String())
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			out := svc.DeleteComponent(context.Background(), tc.input)
+			if !out.Success || deletes != 1 {
+				t.Fatalf("out=%+v deletes=%d", out, deletes)
+			}
+			data, ok := out.Data.(map[string]any)
+			if !ok || data["mutationApplied"] != true {
+				t.Fatalf("data=%#v", out.Data)
+			}
+		})
+	}
+}
+
+func TestComponentToolsPassThroughJiraPolicySuccessesAndErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		call      func(*Service) result.Envelope
+		wantRoute string
+		status    int
+		body      string
+		wantCode  string
+	}{
+		{
+			name: "duplicate create error",
+			call: func(s *Service) result.Envelope {
+				return s.CreateComponent(context.Background(), CreateComponentInput{ProjectKey: "PROJ", Name: "Duplicate"})
+			},
+			wantRoute: "POST /rest/api/2/component",
+			status:    http.StatusBadRequest,
+			body:      `{"errorMessages":["duplicate component name"],"errors":{"name":"already exists","password":"policy-secret"}}`,
+			wantCode:  "VALIDATION_ERROR",
+		},
+		{
+			name: "unassigned create success",
+			call: func(s *Service) result.Envelope {
+				return s.CreateComponent(context.Background(), CreateComponentInput{ProjectKey: "PROJ", Name: "Ops", AssigneeType: "UNASSIGNED"})
+			},
+			wantRoute: "POST /rest/api/2/component",
+			status:    http.StatusCreated,
+			body:      `{"id":"10012","name":"Ops","assigneeType":"UNASSIGNED"}`,
+		},
+		{
+			name: "same replacement delete reaches Jira",
+			call: func(s *Service) result.Envelope {
+				return s.DeleteComponent(context.Background(), DeleteComponentInput{ComponentID: "10010", MoveIssuesTo: strPtr("10010")})
+			},
+			wantRoute: "DELETE /rest/api/2/component/10010",
+			status:    http.StatusBadRequest,
+			body:      `{"errorMessages":["cannot replace with same component"]}`,
+			wantCode:  "VALIDATION_ERROR",
+		},
+		{
+			name: "missing replacement delete reaches Jira",
+			call: func(s *Service) result.Envelope {
+				return s.DeleteComponent(context.Background(), DeleteComponentInput{ComponentID: "10010", MoveIssuesTo: strPtr("404")})
+			},
+			wantRoute: "DELETE /rest/api/2/component/10010",
+			status:    http.StatusNotFound,
+			body:      `{"errorMessages":["replacement component not found"]}`,
+			wantCode:  "UPSTREAM_NOT_FOUND",
+		},
+		{
+			name: "cross project replacement delete reaches Jira",
+			call: func(s *Service) result.Envelope {
+				return s.DeleteComponent(context.Background(), DeleteComponentInput{ComponentID: "10010", MoveIssuesTo: strPtr("20000")})
+			},
+			wantRoute: "DELETE /rest/api/2/component/10010",
+			status:    http.StatusBadRequest,
+			body:      `{"errorMessages":["replacement belongs to another project"]}`,
+			wantCode:  "VALIDATION_ERROR",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if gotRoute := r.Method + " " + r.URL.Path; gotRoute != tt.wantRoute {
+					t.Fatalf("route=%s, want %s", gotRoute, tt.wantRoute)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			out := tt.call(svc)
+			if calls != 1 {
+				t.Fatalf("policy case sent %d requests, want exactly one", calls)
+			}
+			if tt.wantCode == "" {
+				if !out.Success {
+					t.Fatalf("out=%+v", out)
+				}
+				return
+			}
+			if out.Success || out.Error == nil || out.Error.Code != tt.wantCode {
+				t.Fatalf("out=%+v, want code %s", out, tt.wantCode)
+			}
+			raw, _ := json.Marshal(out)
+			if strings.Contains(strings.ToLower(string(raw)), "policy-secret") {
+				t.Fatalf("error envelope leaked sentinel secret: %s", string(raw))
+			}
+		})
+	}
+}
+
+func TestGetComponentIssueCountAndListProjectComponentsReturnNativeJSON(t *testing.T) {
+	cases := []struct {
+		name   string
+		call   func(*Service) result.Envelope
+		want   string
+		body   any
+		assert func(t *testing.T, data any)
+	}{
+		{
+			name: "zero issue count",
+			call: func(s *Service) result.Envelope {
+				return s.GetComponentIssueCount(context.Background(), GetComponentIssueCountInput{ComponentID: "10010"})
+			},
+			want: "GET /rest/api/2/component/10010/relatedIssueCounts",
+			body: map[string]any{"issueCount": 0},
+			assert: func(t *testing.T, data any) {
+				got := data.(map[string]any)
+				if got["issueCount"] != float64(0) {
+					t.Fatalf("data=%#v", data)
+				}
+			},
+		},
+		{
+			name: "nonzero issue count",
+			call: func(s *Service) result.Envelope {
+				return s.GetComponentIssueCount(context.Background(), GetComponentIssueCountInput{ComponentID: "10010"})
+			},
+			want: "GET /rest/api/2/component/10010/relatedIssueCounts",
+			body: map[string]any{"issueCount": 3},
+			assert: func(t *testing.T, data any) {
+				got := data.(map[string]any)
+				if got["issueCount"] != float64(3) {
+					t.Fatalf("data=%#v", data)
+				}
+			},
+		},
+		{
+			name: "empty project component list",
+			call: func(s *Service) result.Envelope {
+				return s.ListProjectComponents(context.Background(), ListProjectComponentsInput{ProjectIDOrKey: "PROJ"})
+			},
+			want: "GET /rest/api/2/project/PROJ/components",
+			body: []any{},
+			assert: func(t *testing.T, data any) {
+				got := data.([]any)
+				if len(got) != 0 {
+					t.Fatalf("data=%#v", data)
+				}
+			},
+		},
+		{
+			name: "multi project component list",
+			call: func(s *Service) result.Envelope {
+				return s.ListProjectComponents(context.Background(), ListProjectComponentsInput{ProjectIDOrKey: "PROJ"})
+			},
+			want: "GET /rest/api/2/project/PROJ/components",
+			body: []map[string]any{{"id": "10010", "name": "Backend"}, {"id": "10011", "name": "Frontend"}},
+			assert: func(t *testing.T, data any) {
+				got := data.([]any)
+				if len(got) != 2 || got[0].(map[string]any)["name"] != "Backend" || got[1].(map[string]any)["name"] != "Frontend" {
+					t.Fatalf("data=%#v", data)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if gotRoute := r.Method + " " + r.URL.Path; gotRoute != tc.want {
+					t.Fatalf("route=%s, want %s", gotRoute, tc.want)
+				}
+				_ = json.NewEncoder(w).Encode(tc.body)
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			out := tc.call(svc)
+			if !out.Success {
+				t.Fatalf("out=%+v", out)
+			}
+			tc.assert(t, out.Data)
+		})
+	}
+}
+
+func TestJiraComponentRegistrationSchemasAnnotationsAndBindings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/component/10010" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "10010", "name": "Backend"})
+	}))
+	t.Cleanup(server.Close)
+
+	svc := newTestService(server.URL, server.Client())
+	svc.Store().Replace(auth.NewCredential("alice", "secret"))
+	client := newMCPJiraTestClient(t, svc)
+
+	list, err := client.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	registered := map[string]*mcp.Tool{}
+	for _, tool := range list.Tools {
+		registered[tool.Name] = tool
+		if tool.OutputSchema == nil {
+			t.Fatalf("%s missing output schema", tool.Name)
+		}
+	}
+	schemas := map[string]struct {
+		required []string
+		props    []string
+		forbid   []string
+	}{
+		"jira_create_component":          {required: []string{"projectKey", "name"}, props: []string{"projectKey", "name", "description", "leadUserName", "assigneeType"}, forbid: []string{"projectId", "projectIdOrKey"}},
+		"jira_get_component":             {required: []string{"componentId"}, props: []string{"componentId"}},
+		"jira_update_component":          {required: []string{"componentId"}, props: []string{"componentId", "name", "description", "leadUserName", "assigneeType"}},
+		"jira_delete_component":          {required: []string{"componentId"}, props: []string{"componentId", "moveIssuesTo"}},
+		"jira_get_component_issue_count": {required: []string{"componentId"}, props: []string{"componentId"}},
+		"jira_list_project_components":   {required: []string{"projectIdOrKey"}, props: []string{"projectIdOrKey"}},
+	}
+	for name, want := range schemas {
+		tool := registered[name]
+		if tool == nil {
+			t.Fatalf("missing registered tool %s", name)
+		}
+		schema := requireSchemaMap(t, tool.InputSchema)
+		requireSchemaRequired(t, schema, want.required)
+		requireSchemaProperties(t, schema, want.props...)
+		forbidSchemaProperties(t, schema, want.forbid...)
+	}
+	annotations := map[string]struct {
+		readOnly    bool
+		destructive bool
+		idempotent  bool
+	}{
+		"jira_create_component":          {readOnly: false, destructive: false, idempotent: false},
+		"jira_get_component":             {readOnly: true, destructive: false, idempotent: true},
+		"jira_update_component":          {readOnly: false, destructive: true, idempotent: true},
+		"jira_delete_component":          {readOnly: false, destructive: true, idempotent: true},
+		"jira_get_component_issue_count": {readOnly: true, destructive: false, idempotent: true},
+		"jira_list_project_components":   {readOnly: true, destructive: false, idempotent: true},
+	}
+	for name, want := range annotations {
+		got := registered[name].Annotations
+		if got == nil || got.OpenWorldHint == nil || !*got.OpenWorldHint {
+			t.Fatalf("%s missing open-world annotation", name)
+		}
+		destructive := true
+		if got.DestructiveHint != nil {
+			destructive = *got.DestructiveHint
+		}
+		if got.ReadOnlyHint != want.readOnly || destructive != want.destructive || got.IdempotentHint != want.idempotent {
+			t.Fatalf("%s annotations=%+v", name, got)
+		}
+	}
+
+	out := callJiraMCPEnvelope(t, client, "jira_get_component", map[string]any{"componentId": "10010"})
+	if !out.Success {
+		t.Fatalf("out=%+v", out)
+	}
+	data, ok := out.Data.(map[string]any)
+	if !ok || data["id"] != "10010" {
+		t.Fatalf("data=%#v", out.Data)
+	}
+}
+
+func TestJiraComponentMCPDispatchCoversEveryRegistration(t *testing.T) {
+	type requestRecord struct {
+		method string
+		path   string
+		query  string
+		body   string
+	}
+	cases := []struct {
+		name      string
+		args      map[string]any
+		want      requestRecord
+		status    int
+		body      string
+		assert    func(t *testing.T, out result.Envelope)
+		wantCalls int
+	}{
+		{
+			name:   "jira_create_component",
+			args:   map[string]any{"projectKey": "PROJ", "name": "Backend", "description": "Services"},
+			want:   requestRecord{method: http.MethodPost, path: "/rest/api/2/component", body: `{"description":"Services","name":"Backend","project":"PROJ"}`},
+			status: http.StatusCreated,
+			body:   `{"id":"10010","name":"Backend"}`,
+			assert: func(t *testing.T, out result.Envelope) {
+				data := out.Data.(map[string]any)
+				if data["id"] != "10010" || data["name"] != "Backend" {
+					t.Fatalf("data=%#v", out.Data)
+				}
+			},
+			wantCalls: 1,
+		},
+		{
+			name:   "jira_get_component",
+			args:   map[string]any{"componentId": "10010"},
+			want:   requestRecord{method: http.MethodGet, path: "/rest/api/2/component/10010"},
+			status: http.StatusOK,
+			body:   `{"id":"10010","name":"Backend"}`,
+			assert: func(t *testing.T, out result.Envelope) {
+				if out.Data.(map[string]any)["id"] != "10010" {
+					t.Fatalf("data=%#v", out.Data)
+				}
+			},
+			wantCalls: 1,
+		},
+		{
+			name:   "jira_update_component",
+			args:   map[string]any{"componentId": "10010", "description": ""},
+			want:   requestRecord{method: http.MethodPut, path: "/rest/api/2/component/10010", body: `{"description":""}`},
+			status: http.StatusOK,
+			body:   `{"id":"10010","description":""}`,
+			assert: func(t *testing.T, out result.Envelope) {
+				if out.Data.(map[string]any)["id"] != "10010" {
+					t.Fatalf("data=%#v", out.Data)
+				}
+			},
+			wantCalls: 1,
+		},
+		{
+			name:   "jira_delete_component",
+			args:   map[string]any{"componentId": "10010", "moveIssuesTo": "10011"},
+			want:   requestRecord{method: http.MethodDelete, path: "/rest/api/2/component/10010", query: "moveIssuesTo=10011"},
+			status: http.StatusNoContent,
+			assert: func(t *testing.T, out result.Envelope) {
+				if out.Data.(map[string]any)["mutationApplied"] != true {
+					t.Fatalf("data=%#v", out.Data)
+				}
+			},
+			wantCalls: 1,
+		},
+		{
+			name:   "jira_get_component_issue_count",
+			args:   map[string]any{"componentId": "10010"},
+			want:   requestRecord{method: http.MethodGet, path: "/rest/api/2/component/10010/relatedIssueCounts"},
+			status: http.StatusOK,
+			body:   `{"issueCount":7}`,
+			assert: func(t *testing.T, out result.Envelope) {
+				if out.Data.(map[string]any)["issueCount"] != float64(7) {
+					t.Fatalf("data=%#v", out.Data)
+				}
+			},
+			wantCalls: 1,
+		},
+		{
+			name:   "jira_list_project_components",
+			args:   map[string]any{"projectIdOrKey": "PROJ"},
+			want:   requestRecord{method: http.MethodGet, path: "/rest/api/2/project/PROJ/components"},
+			status: http.StatusOK,
+			body:   `[{"id":"10010","name":"Backend"}]`,
+			assert: func(t *testing.T, out result.Envelope) {
+				if len(out.Data.([]any)) != 1 {
+					t.Fatalf("data=%#v", out.Data)
+				}
+			},
+			wantCalls: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got requestRecord
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, _ := io.ReadAll(r.Body)
+				got = requestRecord{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(body)}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			client := newMCPJiraTestClient(t, svc)
+			out := callJiraMCPEnvelope(t, client, tc.name, tc.args)
+			if !out.Success || out.Tool != tc.name {
+				t.Fatalf("out=%+v", out)
+			}
+			if got != tc.want {
+				t.Fatalf("request=%+v, want %+v", got, tc.want)
+			}
+			if calls != tc.wantCalls {
+				t.Fatalf("calls=%d, want %d", calls, tc.wantCalls)
+			}
+			tc.assert(t, out)
+		})
+	}
+}
+
+func TestJiraComponentMCPDispatchPreAuthAndRedactedErrors(t *testing.T) {
+	preAuthCases := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "jira_create_component", args: map[string]any{"projectKey": "PROJ", "name": "Backend"}},
+		{name: "jira_get_component", args: map[string]any{"componentId": "10010"}},
+		{name: "jira_update_component", args: map[string]any{"componentId": "10010", "name": "Backend"}},
+		{name: "jira_delete_component", args: map[string]any{"componentId": "10010"}},
+		{name: "jira_get_component_issue_count", args: map[string]any{"componentId": "10010"}},
+		{name: "jira_list_project_components", args: map[string]any{"projectIdOrKey": "PROJ"}},
+	}
+	for _, tc := range preAuthCases {
+		t.Run("preauth "+tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+			t.Cleanup(server.Close)
+
+			client := newMCPJiraTestClient(t, newTestService(server.URL, server.Client()))
+			out := callJiraMCPEnvelope(t, client, tc.name, tc.args)
+			if out.Success || out.Tool != tc.name || out.Error == nil || out.Error.Code != "JIRA_NOT_AUTHENTICATED" {
+				t.Fatalf("out=%+v", out)
+			}
+			if calls != 0 {
+				t.Fatalf("pre-auth %s sent %d requests", tc.name, calls)
+			}
+		})
+	}
+
+	errorCases := []struct {
+		name string
+		args map[string]any
+		want requestRoute
+	}{
+		{name: "jira_create_component", args: map[string]any{"projectKey": "PROJ", "name": "Backend"}, want: requestRoute{method: http.MethodPost, path: "/rest/api/2/component"}},
+		{name: "jira_get_component", args: map[string]any{"componentId": "10010"}, want: requestRoute{method: http.MethodGet, path: "/rest/api/2/component/10010"}},
+		{name: "jira_update_component", args: map[string]any{"componentId": "10010", "name": "Backend"}, want: requestRoute{method: http.MethodPut, path: "/rest/api/2/component/10010"}},
+		{name: "jira_get_component_issue_count", args: map[string]any{"componentId": "10010"}, want: requestRoute{method: http.MethodGet, path: "/rest/api/2/component/10010/relatedIssueCounts"}},
+		{name: "jira_list_project_components", args: map[string]any{"projectIdOrKey": "PROJ"}, want: requestRoute{method: http.MethodGet, path: "/rest/api/2/project/PROJ/components"}},
+	}
+	for _, tc := range errorCases {
+		t.Run("redacted error "+tc.name, func(t *testing.T) {
+			var got requestRoute
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = requestRoute{method: r.Method, path: r.URL.Path}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"errorMessages":["bad component"],"errors":{"password":"mcp-secret"}}`))
+			}))
+			t.Cleanup(server.Close)
+
+			svc := newTestService(server.URL, server.Client())
+			svc.Store().Replace(auth.NewCredential("alice", "secret"))
+			client := newMCPJiraTestClient(t, svc)
+			out := callJiraMCPEnvelope(t, client, tc.name, tc.args)
+			if out.Success || out.Tool != tc.name || out.Error == nil || out.Error.Code != "VALIDATION_ERROR" {
+				t.Fatalf("out=%+v", out)
+			}
+			if got != tc.want {
+				t.Fatalf("route=%+v, want %+v", got, tc.want)
+			}
+			raw, _ := json.Marshal(out)
+			if strings.Contains(strings.ToLower(string(raw)), "mcp-secret") {
+				t.Fatalf("error envelope leaked sentinel secret: %s", string(raw))
+			}
+		})
+	}
+}
+
 func TestJiraToolDefinitionsHaveSecurityAnnotations(t *testing.T) {
 	defs := Definitions()
 	seen := map[string]bool{}
 	for _, def := range defs {
+		if seen[def.Name] {
+			t.Fatalf("duplicate tool name %s", def.Name)
+		}
 		seen[def.Name] = true
 		if def.Annotations == nil || def.Annotations.OpenWorldHint == nil || !*def.Annotations.OpenWorldHint {
 			t.Fatalf("%s missing open-world annotation", def.Name)
@@ -2384,35 +3309,37 @@ func TestJiraToolDefinitionsHaveSecurityAnnotations(t *testing.T) {
 				t.Fatalf("%s should be additive write", def.Name)
 			}
 		case "jira_delete_issue", "jira_assign_issue", "jira_update_issue_comment", "jira_delete_issue_comment", "jira_delete_issue_attachment",
-			"jira_remove_issue_watcher", "jira_unvote_issue":
+			"jira_remove_issue_watcher", "jira_unvote_issue", "jira_update_component", "jira_delete_component":
 			if def.Annotations.ReadOnlyHint || def.Annotations.DestructiveHint == nil || !*def.Annotations.DestructiveHint {
 				t.Fatalf("%s should be destructive", def.Name)
 			}
-		case "jira_list_issue_comments", "jira_list_issue_transitions", "jira_list_issue_worklogs", "jira_get_issue_watchers":
+		case "jira_list_issue_comments", "jira_list_issue_transitions", "jira_list_issue_worklogs", "jira_get_issue_watchers",
+			"jira_get_component", "jira_get_component_issue_count", "jira_list_project_components":
 			if !def.Annotations.ReadOnlyHint {
 				t.Fatalf("%s must be read-only", def.Name)
 			}
-		case "jira_add_issue_attachment", "jira_add_issue_worklog", "jira_add_issue_watcher", "jira_vote_issue", "jira_create_issue_link":
+		case "jira_add_issue_attachment", "jira_add_issue_worklog", "jira_add_issue_watcher", "jira_vote_issue", "jira_create_issue_link",
+			"jira_create_component":
 			if def.Annotations.ReadOnlyHint || def.Annotations.DestructiveHint == nil || *def.Annotations.DestructiveHint {
 				t.Fatalf("%s should be additive write", def.Name)
 			}
 		}
 	}
-	// The full 24-tool roster: 5 original tools plus all 19 tools added across this plan's dispatches
-	// (Groups A-H). This is the final dispatch, so this list must now be complete with no gaps.
+	// The full 30-tool roster: the existing 24 Jira tools plus exactly six Component tools.
 	for _, name := range []string{
 		"jira_authenticate", "jira_get_issue", "jira_add_issue_comment", "jira_update_issue_fields", "jira_transition_issue",
 		"jira_create_issue", "jira_bulk_create_issues", "jira_delete_issue", "jira_assign_issue", "jira_search_issues",
 		"jira_list_issue_comments", "jira_update_issue_comment", "jira_delete_issue_comment", "jira_list_issue_transitions",
 		"jira_add_issue_attachment", "jira_delete_issue_attachment", "jira_list_issue_worklogs", "jira_add_issue_worklog",
 		"jira_get_issue_watchers", "jira_add_issue_watcher", "jira_remove_issue_watcher", "jira_vote_issue", "jira_unvote_issue",
-		"jira_create_issue_link",
+		"jira_create_issue_link", "jira_create_component", "jira_get_component", "jira_update_component", "jira_delete_component",
+		"jira_get_component_issue_count", "jira_list_project_components",
 	} {
 		if !seen[name] {
 			t.Fatalf("missing tool %s", name)
 		}
 	}
-	if len(defs) != 24 {
-		t.Fatalf("expected exactly 24 tool definitions, got %d", len(defs))
+	if len(defs) != 30 {
+		t.Fatalf("expected exactly 30 tool definitions, got %d", len(defs))
 	}
 }

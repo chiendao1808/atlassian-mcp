@@ -280,6 +280,52 @@ type CreateIssueLinkInput struct {
 	Comment      map[string]any `json:"comment,omitempty" jsonschema:"Optional native Jira comment payload attached to the link"`
 }
 
+// CreateComponentInput creates a Jira project Component by project key. The Jira 6.4.14 endpoint
+// wants a body field named "project", so ProjectKey is intentionally not forwarded under its MCP
+// input name and no projectId variant is modeled. ProjectKey and Name are trimmed only for
+// blank-value validation; nonblank caller-provided values are forwarded unchanged.
+type CreateComponentInput struct {
+	ProjectKey   string `json:"projectKey" jsonschema:"Jira project key that receives the Component (required); sent to Jira as body field project"`
+	Name         string `json:"name" jsonschema:"Component name (required)"`
+	Description  string `json:"description,omitempty" jsonschema:"Optional Component description"`
+	LeadUserName string `json:"leadUserName,omitempty" jsonschema:"Optional Jira username for the Component lead"`
+	AssigneeType string `json:"assigneeType,omitempty" jsonschema:"Optional Jira assignee type: PROJECT_DEFAULT, COMPONENT_LEAD, PROJECT_LEAD, or UNASSIGNED"`
+}
+
+// GetComponentInput selects exactly one Jira Component by its REST path ID.
+type GetComponentInput struct {
+	ComponentID string `json:"componentId" jsonschema:"Jira Component ID (required)"`
+}
+
+// UpdateComponentInput applies a partial Jira Component update. Pointer fields preserve the
+// difference between an omitted field and an explicitly supplied empty string, which Jira can use to
+// clear mutable Component fields.
+type UpdateComponentInput struct {
+	ComponentID  string  `json:"componentId" jsonschema:"Jira Component ID (required)"`
+	Name         *string `json:"name,omitempty" jsonschema:"Optional replacement Component name"`
+	Description  *string `json:"description,omitempty" jsonschema:"Optional replacement Component description; empty string is sent when explicitly supplied"`
+	LeadUserName *string `json:"leadUserName,omitempty" jsonschema:"Optional replacement Component lead username; empty string is sent when explicitly supplied"`
+	AssigneeType *string `json:"assigneeType,omitempty" jsonschema:"Optional Jira assignee type: PROJECT_DEFAULT, COMPONENT_LEAD, PROJECT_LEAD, or UNASSIGNED"`
+}
+
+// DeleteComponentInput deletes one Jira Component. MoveIssuesTo is optional and, when set, is sent
+// only as Jira's query parameter; source/target project policy and same-target behavior remain Jira
+// server decisions.
+type DeleteComponentInput struct {
+	ComponentID  string  `json:"componentId" jsonschema:"Jira Component ID to delete (required)"`
+	MoveIssuesTo *string `json:"moveIssuesTo,omitempty" jsonschema:"Optional replacement Component ID for affected issues; sent as a query parameter"`
+}
+
+// GetComponentIssueCountInput selects one Component's Jira related issue count endpoint.
+type GetComponentIssueCountInput struct {
+	ComponentID string `json:"componentId" jsonschema:"Jira Component ID (required)"`
+}
+
+// ListProjectComponentsInput selects the Jira project whose bare Component array should be listed.
+type ListProjectComponentsInput struct {
+	ProjectIDOrKey string `json:"projectIdOrKey" jsonschema:"Jira project ID or key (required)"`
+}
+
 // Authenticate verifies candidate credentials with Jira before replacing the active process session.
 // Explicit tool input wins; an empty field falls back to JIRA_USERNAME/JIRA_PASSWORD read at call time.
 func (s *Service) Authenticate(ctx context.Context, input AuthenticateInput) result.Envelope {
@@ -943,6 +989,151 @@ func (s *Service) CreateIssueLink(ctx context.Context, input CreateIssueLinkInpu
 		return jiraClientError("jira_create_issue_link", "", err)
 	}
 	return result.OK("jira", "jira_create_issue_link", map[string]any{"mutationApplied": true})
+}
+
+// CreateComponent posts one Jira Component create request. Only MCP-owned required-field validation
+// happens locally; duplicate names, lead validity, and assignee configuration are Jira policy and are
+// passed through via jiraClientError.
+func (s *Service) CreateComponent(ctx context.Context, input CreateComponentInput) result.Envelope {
+	cred, errEnv := s.requireCredential("jira_create_component")
+	if errEnv != nil {
+		return *errEnv
+	}
+	if strings.TrimSpace(input.ProjectKey) == "" {
+		return result.Fail("jira", "jira_create_component", "VALIDATION_ERROR", "projectKey is required")
+	}
+	if strings.TrimSpace(input.Name) == "" {
+		return result.Fail("jira", "jira_create_component", "VALIDATION_ERROR", "name is required")
+	}
+	body := map[string]any{"project": input.ProjectKey, "name": input.Name}
+	if input.Description != "" {
+		body["description"] = input.Description
+	}
+	if input.LeadUserName != "" {
+		body["leadUserName"] = input.LeadUserName
+	}
+	if input.AssigneeType != "" {
+		body["assigneeType"] = input.AssigneeType
+	}
+	var component map[string]any
+	if err := s.client.PostJSON(ctx, cred, "/component", body, &component); err != nil {
+		return jiraClientError("jira_create_component", "", err)
+	}
+	return result.OK("jira", "jira_create_component", observability.Redact(component))
+}
+
+// GetComponent returns Jira's native Component JSON for one safe Component ID.
+func (s *Service) GetComponent(ctx context.Context, input GetComponentInput) result.Envelope {
+	cred, errEnv := s.requireCredential("jira_get_component")
+	if errEnv != nil {
+		return *errEnv
+	}
+	componentID, invalid := cleanPathSegment("jira_get_component", "componentId", input.ComponentID)
+	if invalid != nil {
+		return *invalid
+	}
+	var component map[string]any
+	if err := s.client.GetJSON(ctx, cred, "/component/"+componentID, nil, &component); err != nil {
+		return jiraClientError("jira_get_component", "", err)
+	}
+	return result.OK("jira", "jira_get_component", observability.Redact(component))
+}
+
+// UpdateComponent sends only caller-supplied Component fields. A successful empty 200 response maps
+// to the shared mutation acknowledgement; a non-empty JSON 200 is returned as Jira sent it.
+func (s *Service) UpdateComponent(ctx context.Context, input UpdateComponentInput) result.Envelope {
+	cred, errEnv := s.requireCredential("jira_update_component")
+	if errEnv != nil {
+		return *errEnv
+	}
+	componentID, invalid := cleanPathSegment("jira_update_component", "componentId", input.ComponentID)
+	if invalid != nil {
+		return *invalid
+	}
+	body := map[string]any{}
+	if input.Name != nil {
+		body["name"] = *input.Name
+	}
+	if input.Description != nil {
+		body["description"] = *input.Description
+	}
+	if input.LeadUserName != nil {
+		body["leadUserName"] = *input.LeadUserName
+	}
+	if input.AssigneeType != nil {
+		body["assigneeType"] = *input.AssigneeType
+	}
+	if len(body) == 0 {
+		return result.Fail("jira", "jira_update_component", "VALIDATION_ERROR", "at least one component field is required")
+	}
+	var component map[string]any
+	if err := s.client.PutJSON(ctx, cred, "/component/"+componentID, body, &component); err != nil {
+		return jiraClientError("jira_update_component", "", err)
+	}
+	if component == nil {
+		return result.OK("jira", "jira_update_component", map[string]any{"mutationApplied": true})
+	}
+	return result.OK("jira", "jira_update_component", observability.Redact(component))
+}
+
+// DeleteComponent sends exactly one Jira DELETE request. It deliberately performs no source/target
+// lookup, project comparison, retry, or same-component prevalidation; Jira owns those policies.
+func (s *Service) DeleteComponent(ctx context.Context, input DeleteComponentInput) result.Envelope {
+	cred, errEnv := s.requireCredential("jira_delete_component")
+	if errEnv != nil {
+		return *errEnv
+	}
+	componentID, invalid := cleanPathSegment("jira_delete_component", "componentId", input.ComponentID)
+	if invalid != nil {
+		return *invalid
+	}
+	var q query
+	if input.MoveIssuesTo != nil {
+		moveIssuesTo, invalid := cleanPathSegment("jira_delete_component", "moveIssuesTo", *input.MoveIssuesTo)
+		if invalid != nil {
+			return *invalid
+		}
+		q = q.add("moveIssuesTo", moveIssuesTo)
+	}
+	if err := s.client.DeleteJSON(ctx, cred, "/component/"+componentID, map[string][]string(q), nil); err != nil {
+		return jiraClientError("jira_delete_component", "", err)
+	}
+	return result.OK("jira", "jira_delete_component", map[string]any{"mutationApplied": true})
+}
+
+// GetComponentIssueCount returns Jira's native relatedIssueCounts object for one Component.
+func (s *Service) GetComponentIssueCount(ctx context.Context, input GetComponentIssueCountInput) result.Envelope {
+	cred, errEnv := s.requireCredential("jira_get_component_issue_count")
+	if errEnv != nil {
+		return *errEnv
+	}
+	componentID, invalid := cleanPathSegment("jira_get_component_issue_count", "componentId", input.ComponentID)
+	if invalid != nil {
+		return *invalid
+	}
+	var counts map[string]any
+	if err := s.client.GetJSON(ctx, cred, "/component/"+componentID+"/relatedIssueCounts", nil, &counts); err != nil {
+		return jiraClientError("jira_get_component_issue_count", "", err)
+	}
+	return result.OK("jira", "jira_get_component_issue_count", observability.Redact(counts))
+}
+
+// ListProjectComponents returns Jira's bare Component array for a project ID or key without adding
+// local pagination, uniqueness, or assignee policy.
+func (s *Service) ListProjectComponents(ctx context.Context, input ListProjectComponentsInput) result.Envelope {
+	cred, errEnv := s.requireCredential("jira_list_project_components")
+	if errEnv != nil {
+		return *errEnv
+	}
+	projectIDOrKey, invalid := cleanPathSegment("jira_list_project_components", "projectIdOrKey", input.ProjectIDOrKey)
+	if invalid != nil {
+		return *invalid
+	}
+	var components []any
+	if err := s.client.GetJSON(ctx, cred, "/project/"+projectIDOrKey+"/components", nil, &components); err != nil {
+		return jiraClientError("jira_list_project_components", "", err)
+	}
+	return result.OK("jira", "jira_list_project_components", observability.Redact(components))
 }
 
 // requireCredential blocks business tools before jira_authenticate and deliberately sends no network request.

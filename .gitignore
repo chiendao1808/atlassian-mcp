@@ -9,3 +9,6 @@ scripts/bin/harness.exe
 # agents
 .agents/skills/self
 .agents/skills/community
+
+# runtime
+.agents/orchestration/runtime

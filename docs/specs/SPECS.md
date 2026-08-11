@@ -480,7 +480,7 @@ The password property must be documented as sensitive. The MCP server cannot gua
 
 ### 7.4 Authentication gating
 
-When Jira static configuration is valid, all five Jira tools are registered from startup. Until authentication succeeds, every Jira business tool except `jira_authenticate` returns `JIRA_NOT_AUTHENTICATED` without sending a request to Jira.
+When Jira static configuration is valid, all registered Jira tools are available from startup. Until authentication succeeds, every Jira business tool except `jira_authenticate` returns `JIRA_NOT_AUTHENTICATED` without sending a request to Jira.
 
 ### 7.5 Automatic authentication on startup
 
@@ -1327,7 +1327,7 @@ The 27 tasks below are self-contained. Each task ends with unit/contract tests, 
 - Accept only HTTP/HTTPS schemes.
 - Reject query and fragment components.
 - Validate `JIRA_CA_FILE` only when Jira is requested and verify is true.
-- Register all five Jira tools after successful static validation.
+- Register all Jira tool definitions after successful static validation.
 - Do not make network requests at startup.
 
 **Acceptance:** Jira tool visibility depends only on valid static Jira configuration, not live network or credentials.
@@ -1977,7 +1977,7 @@ No installer example includes Jira username/password.
 - [ ] Jira credentials are accepted only by `jira_authenticate` and held only in process memory.
 - [ ] Authentication calls `serverInfo` then `myself` before atomic activation.
 - [ ] Failed re-authentication preserves the active credential.
-- [ ] All five Jira tools are registered after valid static configuration.
+- [ ] All Jira tool definitions are registered after valid static configuration.
 - [ ] Pre-auth Jira business tools return `JIRA_NOT_AUTHENTICATED` without network calls.
 - [ ] `jira_get_issue` supports passthrough `fields` and `expand`.
 - [ ] Comment visibility supports optional `role` and `group`.

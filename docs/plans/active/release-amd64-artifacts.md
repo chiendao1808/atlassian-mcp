@@ -296,6 +296,13 @@ responses must not be placed in the workflow, release assets, or public logs.
 - [x] CR-004: remove unnecessary `actions: write` from
   `validate-draft-ubuntu`; it keeps `contents: read` and uses the default
   artifact upload behavior.
+- [x] Fix GitHub Actions run 31509587046 Ubuntu ShellCheck failure by replacing
+  the Bash installer test's `grep | wc -l` count pipeline with a
+  ShellCheck-clean `grep -F -c` count that still treats no matches as zero.
+- [x] Fix GitHub Actions run 31509587046 Windows PSScriptAnalyzer failure by
+  invoking PSScriptAnalyzer separately for the two fixed PowerShell paths,
+  collecting all error-severity diagnostics, printing them, and failing only
+  when the collected count is non-zero.
 - [ ] Record automated job URLs and external evidence links in **Validation**
   and **Result**. Keep the plan active if a first tagged release has not yet
   passed all gates.
@@ -392,6 +399,13 @@ responses must not be placed in the workflow, release assets, or public logs.
 - 2026-08-11: PSScriptAnalyzer remains limited to `-Severity Error`; the
   workflow prints those diagnostics and fails only when error-severity results
   exist.
+- 2026-08-11: PSScriptAnalyzer 1.24.0 rejects the workflow's previous
+  two-element object array supplied to `Invoke-ScriptAnalyzer -Path`, so the
+  Windows quality job analyzes each fixed path separately and then evaluates
+  the aggregated diagnostics.
+- 2026-08-11: ShellCheck SC2126 rejects the Bash installer's test-only
+  `grep | wc -l` count pipeline; `grep -F -c` is the canonical count form, with
+  explicit no-match normalization because `grep` exits 1 after printing zero.
 - 2026-08-11: Snapshot staging is allowed only after the complete GoReleaser
   `artifacts.json` manifest matches the approved release shape: `Metadata`
   `metadata.json` (`internal_type` 35), build-only `Binary` records for
@@ -509,13 +523,34 @@ Local validation on Windows:
   before publication logic.
 - `git diff --check` passed with line-ending warnings only for existing
   Windows checkout behavior.
+- GitHub Actions run 31509587046 produced two red hosted checks that required
+  follow-up: Ubuntu ShellCheck reported SC2126 at
+  `tests/install-from-remote_test.sh:46`, and Windows PSScriptAnalyzer 1.24.0
+  rejected an `Object[]` argument supplied to `Invoke-ScriptAnalyzer -Path` in
+  `.github/workflows/release.yml`.
+- The Bash count helper now uses `grep -F -c` and normalizes grep's no-match
+  exit to count `0`; local Git Bash execution of
+  `tests/install-from-remote_test.sh` is the focused behavioral proof.
+- The Windows quality job now invokes PSScriptAnalyzer separately for
+  `scripts/install-from-remote.ps1` and `tests/install-from-remote.Tests.ps1`,
+  aggregates diagnostics, prints them, and throws when the aggregate
+  error-severity count is non-zero.
+- `C:\Program Files\Git\bin\bash.exe tests/install-from-remote_test.sh` passed
+  after the Bash count fix and printed `PASS install-from-remote_test.sh`.
+- `go test ./...` passed after the GitHub Actions follow-up fixes.
+- `goreleaser check` passed after the GitHub Actions follow-up fixes.
+- `git diff --check` passed after the GitHub Actions follow-up fixes with
+  line-ending warnings only for the edited workflow, plan, and Bash test files.
 
 Local limitations and remaining proof:
 
+- Local command availability check found `shellcheck`, `pwsh`, `actionlint`,
+  `jq`, and `yq` unavailable on this Windows host.
 - `shellcheck` is not installed locally, so ShellCheck remains GitHub-hosted
-  CI proof.
+  CI proof. Re-run the hosted Ubuntu quality job to prove SC2126 is resolved.
 - `pwsh` and PSScriptAnalyzer are not installed locally, so PSScriptAnalyzer
-  remains GitHub-hosted Windows proof.
+  remains GitHub-hosted Windows proof. Re-run the hosted Windows quality job to
+  prove the PSScriptAnalyzer 1.24.0 `-Path` invocation is resolved.
 - Syft is not installed locally, and `go install` of Syft `v1.29.0` plus
   GoReleaser `v2.17.1` timed out after five minutes. Real Syft SBOM content
   generation and parsing remain GitHub-hosted CI proof; local fake-Syft proof

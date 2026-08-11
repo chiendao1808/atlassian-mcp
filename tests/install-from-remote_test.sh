@@ -43,7 +43,9 @@ assert_count() {
   local text="$2"
   local want="$3"
   local got
-  got="$(grep -F -- "$text" "$file" 2>/dev/null | wc -l | tr -d ' ')"
+  # grep prints "0" but exits 1 on no match; keep assert_count safe under errexit.
+  got="$(grep -F -c -- "$text" "$file" 2>/dev/null || :)"
+  got="${got:-0}"
   [[ "$got" == "$want" ]] || fail "count for '$text' in $file = $got, want $want"
 }
 

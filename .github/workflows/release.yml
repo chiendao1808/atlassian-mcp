@@ -70,7 +70,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
           Install-Module -Name Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
-          $diagnostics = @(Invoke-ScriptAnalyzer -Path scripts/install-from-remote.ps1, tests/install-from-remote.Tests.ps1 -Severity Error)
+          # PSScriptAnalyzer 1.24.0 rejects an Object[] -Path, so analyze paths one at a time.
+          $diagnostics = @(
+            foreach ($scriptPath in @('scripts/install-from-remote.ps1', 'tests/install-from-remote.Tests.ps1')) {
+              Invoke-ScriptAnalyzer -Path $scriptPath -Severity Error
+            }
+          )
           $diagnostics | Format-Table -AutoSize
           if ($diagnostics.Count -gt 0) { throw "PSScriptAnalyzer reported $($diagnostics.Count) error-severity diagnostic(s)." }
           Invoke-Pester -Path tests/install-from-remote.Tests.ps1 -CI

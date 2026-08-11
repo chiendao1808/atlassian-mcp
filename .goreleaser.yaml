@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: atlassian-mcp
+
+builds:
+  - id: atlassian-mcp
+    main: ./cmd/atlassian-mcp
+    binary: atlassian-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    targets:
+      - linux_amd64_v1
+      - windows_amd64_v1
+
+archives:
+  - id: raw-binaries
+    ids:
+      - atlassian-mcp
+    # binary uploads the executables directly; no zip or tar archives are produced.
+    formats:
+      - binary
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+nfpms:
+  - id: deb
+    ids:
+      - atlassian-mcp
+    package_name: atlassian-mcp
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.{{ .Format }}"
+    vendor: chiendao1808
+    homepage: https://github.com/chiendao1808/atlassian-mcp
+    maintainer: chiendao1808 <chiendao1808@gmail.com>
+    description: MCP stdio server for Atlassian Server tools.
+    license: MIT
+    formats:
+      - deb
+    bindir: /usr/bin
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+  ids:
+    - raw-binaries
+    - deb
+
+sboms:
+  # Keep one SBOM per delivery artifact so release validation can match names exactly.
+  - id: binary-sboms
+    artifacts: binary
+    ids:
+      - raw-binaries
+    documents:
+      - "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.sbom.json"
+  - id: deb-sbom
+    artifacts: package
+    ids:
+      - deb
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: git
+
+release:
+  github:
+    owner: chiendao1808
+    name: atlassian-mcp
+  draft: true
+  replace_existing_draft: true

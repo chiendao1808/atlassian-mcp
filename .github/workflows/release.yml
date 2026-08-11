@@ -1,0 +1,451 @@
+name: release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25.x"
+  GORELEASER_VERSION: "v2.17.1"
+  SYFT_VERSION: "1.29.0"
+
+jobs:
+  quality-ubuntu:
+    name: Ubuntu quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Go tests
+        run: go test ./...
+
+      - name: Go race tests
+        run: go test -race ./...
+
+      - name: Linker-injected version check
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -ldflags "-X main.version=9.8.7-ci" -o "$RUNNER_TEMP/atlassian-mcp" ./cmd/atlassian-mcp
+          test "$("$RUNNER_TEMP/atlassian-mcp" --version)" = "atlassian-mcp 9.8.7-ci"
+
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck scripts/install-from-remote.sh tests/install-from-remote_test.sh
+
+      - name: Bash installer tests
+        run: bash tests/install-from-remote_test.sh
+
+  quality-windows:
+    name: Windows quality
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: PowerShell installer analysis and tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+          Install-Module -Name Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+          $diagnostics = @(Invoke-ScriptAnalyzer -Path scripts/install-from-remote.ps1, tests/install-from-remote.Tests.ps1 -Severity Error)
+          $diagnostics | Format-Table -AutoSize
+          if ($diagnostics.Count -gt 0) { throw "PSScriptAnalyzer reported $($diagnostics.Count) error-severity diagnostic(s)." }
+          Invoke-Pester -Path tests/install-from-remote.Tests.ps1 -CI
+
+  snapshot:
+    name: GoReleaser snapshot
+    runs-on: ubuntu-latest
+    needs:
+      - quality-ubuntu
+      - quality-windows
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - name: Add Syft to PATH
+        shell: bash
+        run: |
+          syft_cmd='${{ steps.syft.outputs.cmd }}'
+          echo "$(dirname "$syft_cmd")" >> "$GITHUB_PATH"
+
+      - name: Check GoReleaser config
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+
+      - name: Build snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --snapshot --clean --skip=publish
+
+      - name: Validate GoReleaser artifact inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' dist/metadata.json)"
+          cat > .release-expected-assets <<EOF
+          atlassian-mcp_${version}_linux_amd64
+          atlassian-mcp_${version}_windows_amd64.exe
+          atlassian-mcp_${version}_linux_amd64.deb
+          atlassian-mcp_${version}_checksums.txt
+          atlassian-mcp_${version}_linux_amd64.sbom.json
+          atlassian-mcp_${version}_windows_amd64.sbom.json
+          atlassian-mcp_${version}_linux_amd64.deb.sbom.json
+          EOF
+          sed -i 's/^ *//' .release-expected-assets
+          # Check every manifest entry, not just names with the release prefix.
+          jq -r --arg version "$version" '
+            def expected($suffix): "atlassian-mcp_\($version)_\($suffix)";
+            def ok:
+              (.type == "Metadata" and .internal_type == 35 and .name == "metadata.json")
+              or (.type == "Binary" and .internal_type == 4 and .extra.ID == "atlassian-mcp" and (.name == "atlassian-mcp" or .name == "atlassian-mcp.exe"))
+              or (.type == "Binary" and .internal_type == 2 and .extra.ID == "raw-binaries" and (.name == expected("linux_amd64") or .name == expected("windows_amd64.exe")))
+              or (.type == "Linux Package" and .internal_type == 6 and .extra.ID == "deb" and .name == expected("linux_amd64.deb"))
+              or (.type == "SBOM" and .internal_type == 28 and .extra.ID == "binary-sboms" and (.name == expected("linux_amd64.sbom.json") or .name == expected("windows_amd64.sbom.json")))
+              or (.type == "SBOM" and .internal_type == 28 and .extra.ID == "deb-sbom" and .name == expected("linux_amd64.deb.sbom.json"))
+              or (.type == "Checksum" and .internal_type == 12 and .name == expected("checksums.txt"));
+            .[] | select(ok | not)
+          ' dist/artifacts.json > .release-unexpected-artifacts
+          if [ -s .release-unexpected-artifacts ]; then
+            cat .release-unexpected-artifacts
+            exit 1
+          fi
+          jq -r --arg version "$version" '
+            def expected($suffix): "atlassian-mcp_\($version)_\($suffix)";
+            .[] | select(
+              (.type == "Binary" and .internal_type == 2 and .extra.ID == "raw-binaries")
+              or (.type == "Linux Package" and .extra.ID == "deb")
+              or (.type == "SBOM")
+              or (.type == "Checksum")
+            ) | .name
+          ' dist/artifacts.json | sort > .release-actual-assets
+          sort .release-expected-assets > .release-expected-assets.sorted
+          diff -u .release-expected-assets.sorted .release-actual-assets
+          while IFS= read -r name; do
+            path="$(jq -r --arg name "$name" '.[] | select(.name == $name) | .path' dist/artifacts.json)"
+            test -n "$path"
+            test "$path" != "null"
+            test -f "$path"
+          done < .release-expected-assets
+
+      - name: Stage snapshot assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p snapshot-assets
+          while IFS= read -r name; do
+            path="$(jq -r --arg name "$name" '.[] | select(.name == $name) | .path' dist/artifacts.json)"
+            cp "$path" "snapshot-assets/$name"
+          done < .release-expected-assets
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: goreleaser-dist
+          path: snapshot-assets
+          retention-days: 7
+
+  validate-snapshot-ubuntu:
+    name: Validate snapshot on Ubuntu
+    runs-on: ubuntu-latest
+    needs: snapshot
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: goreleaser-dist
+          path: dist
+
+      - name: Validate Linux binary, deb, checksums, and SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          linux_bins=(dist/atlassian-mcp_*_linux_amd64)
+          windows_bins=(dist/atlassian-mcp_*_windows_amd64.exe)
+          debs=(dist/atlassian-mcp_*_linux_amd64.deb)
+          checksums=(dist/atlassian-mcp_*_checksums.txt)
+          sboms=(dist/atlassian-mcp_*_linux_amd64.sbom.json dist/atlassian-mcp_*_windows_amd64.sbom.json dist/atlassian-mcp_*_linux_amd64.deb.sbom.json)
+          test "${#linux_bins[@]}" -eq 1
+          test "${#windows_bins[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+          test "${#checksums[@]}" -eq 1
+          test "${#sboms[@]}" -eq 3
+          version="${linux_bins[0]#dist/atlassian-mcp_}"
+          version="${version%_linux_amd64}"
+          test -f "dist/atlassian-mcp_${version}_windows_amd64.exe"
+          test -f "dist/atlassian-mcp_${version}_linux_amd64.deb"
+          test -f "dist/atlassian-mcp_${version}_checksums.txt"
+          test -f "dist/atlassian-mcp_${version}_linux_amd64.sbom.json"
+          test -f "dist/atlassian-mcp_${version}_windows_amd64.sbom.json"
+          test -f "dist/atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+          unexpected="$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.rpm' -o -name '*darwin*' -o -name '*arm64*' \) -print)"
+          test -z "$unexpected"
+          (cd dist && sha256sum -c "$(basename "${checksums[0]}")")
+          for sbom in "${sboms[@]}"; do
+            jq -e '.spdxVersion and .SPDXID and .packages' "$sbom" >/dev/null
+          done
+          chmod +x "${linux_bins[0]}"
+          test "$("${linux_bins[0]}" --version)" = "atlassian-mcp ${version}"
+          test "$(dpkg-deb --field "${debs[0]}" Maintainer)" = "chiendao1808 <chiendao1808@gmail.com>"
+          test "$(dpkg-deb --field "${debs[0]}" License)" = "MIT"
+          dpkg-deb --contents "${debs[0]}" | grep -E '/usr/bin/atlassian-mcp$'
+          sudo dpkg -i "${debs[0]}"
+          test "$(atlassian-mcp --version)" = "atlassian-mcp ${version}"
+
+  validate-snapshot-windows:
+    name: Validate snapshot on Windows
+    runs-on: windows-latest
+    needs: snapshot
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: goreleaser-dist
+          path: dist
+
+      - name: Validate Windows executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = @(Get-ChildItem -Path dist -File -Filter 'atlassian-mcp_*_windows_amd64.exe')
+          if ($exe.Count -ne 1) { throw "expected one Windows amd64 executable, found $($exe.Count)" }
+          if (Get-ChildItem -Path dist -File | Where-Object { $_.Name -match 'darwin|arm64|\.zip$|\.tar\.gz$|\.rpm$' }) {
+            throw 'unexpected release artifact found'
+          }
+          $match = [regex]::Match($exe[0].Name, '^atlassian-mcp_(.+)_windows_amd64\.exe$')
+          if (-not $match.Success) { throw "unexpected executable name: $($exe[0].Name)" }
+          $expected = "atlassian-mcp $($match.Groups[1].Value)"
+          $actual = & $exe[0].FullName --version
+          if ($actual -ne $expected) { throw "expected '$expected', got '$actual'" }
+
+  draft-release:
+    name: Create draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs:
+      - quality-ubuntu
+      - quality-windows
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Validate tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - name: Add Syft to PATH
+        shell: bash
+        run: |
+          syft_cmd='${{ steps.syft.outputs.cmd }}'
+          echo "$(dirname "$syft_cmd")" >> "$GITHUB_PATH"
+
+      - name: Check GoReleaser config
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+
+      - name: Create draft with GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  validate-draft-ubuntu:
+    name: Validate draft on Ubuntu
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: draft-release
+    permissions:
+      contents: read
+    steps:
+      - name: Download draft assets
+        run: gh release download "${GITHUB_REF_NAME}" --dir dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Linux binary, deb, checksums, and SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            "dist/atlassian-mcp_${version}_linux_amd64"
+            "dist/atlassian-mcp_${version}_windows_amd64.exe"
+            "dist/atlassian-mcp_${version}_linux_amd64.deb"
+            "dist/atlassian-mcp_${version}_checksums.txt"
+            "dist/atlassian-mcp_${version}_linux_amd64.sbom.json"
+            "dist/atlassian-mcp_${version}_windows_amd64.sbom.json"
+            "dist/atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+          )
+          files=(dist/*)
+          test "${#files[@]}" -eq "${#expected[@]}"
+          for file in "${expected[@]}"; do test -f "$file"; done
+          (cd dist && sha256sum -c "atlassian-mcp_${version}_checksums.txt")
+          for sbom in dist/*.sbom.json; do
+            jq -e '.spdxVersion and .SPDXID and .packages' "$sbom" >/dev/null
+          done
+          chmod +x "dist/atlassian-mcp_${version}_linux_amd64"
+          test "$(dist/atlassian-mcp_${version}_linux_amd64 --version)" = "atlassian-mcp ${version}"
+          test "$(dpkg-deb --field "dist/atlassian-mcp_${version}_linux_amd64.deb" Maintainer)" = "chiendao1808 <chiendao1808@gmail.com>"
+          test "$(dpkg-deb --field "dist/atlassian-mcp_${version}_linux_amd64.deb" License)" = "MIT"
+          dpkg-deb --contents "dist/atlassian-mcp_${version}_linux_amd64.deb" | grep -E '/usr/bin/atlassian-mcp$'
+          sudo dpkg -i "dist/atlassian-mcp_${version}_linux_amd64.deb"
+          test "$(atlassian-mcp --version)" = "atlassian-mcp ${version}"
+          (
+            cd dist
+            printf '%s\n' "${expected[@]#dist/}" > ../validated-assets.txt
+            sha256sum "${expected[@]#dist/}" > ../validated-assets.sha256
+          )
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validated-draft-hashes
+          path: |
+            validated-assets.txt
+            validated-assets.sha256
+          retention-days: 7
+
+  validate-draft-windows:
+    name: Validate draft on Windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    needs: draft-release
+    permissions:
+      contents: read
+    steps:
+      - name: Download draft assets
+        run: gh release download "${env:GITHUB_REF_NAME}" --dir dist
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Windows executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $expectedFiles = @(
+            "atlassian-mcp_${version}_linux_amd64",
+            "atlassian-mcp_${version}_windows_amd64.exe",
+            "atlassian-mcp_${version}_linux_amd64.deb",
+            "atlassian-mcp_${version}_checksums.txt",
+            "atlassian-mcp_${version}_linux_amd64.sbom.json",
+            "atlassian-mcp_${version}_windows_amd64.sbom.json",
+            "atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+          )
+          $files = @(Get-ChildItem -Path dist -File)
+          if ($files.Count -ne $expectedFiles.Count) { throw "expected $($expectedFiles.Count) assets, found $($files.Count)" }
+          foreach ($name in $expectedFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path 'dist' $name))) { throw "missing $name" }
+          }
+          $exe = Join-Path 'dist' "atlassian-mcp_${version}_windows_amd64.exe"
+          $actual = & $exe --version
+          $expected = "atlassian-mcp ${version}"
+          if ($actual -ne $expected) { throw "expected '$expected', got '$actual'" }
+
+  publish-release:
+    name: Publish validated draft
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs:
+      - validate-draft-ubuntu
+      - validate-draft-windows
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validated-draft-hashes
+          path: validated-draft
+
+      - name: Re-verify approved draft assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p publish-dist
+          gh release download "${GITHUB_REF_NAME}" --dir publish-dist
+          mapfile -t expected < validated-draft/validated-assets.txt
+          files=(publish-dist/*)
+          test "${#files[@]}" -eq "${#expected[@]}"
+          for name in "${expected[@]}"; do
+            test -f "publish-dist/$name"
+          done
+          (
+            cd publish-dist
+            sha256sum -c ../validated-draft/validated-assets.sha256
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The protected environment approval records same-tag Claude, Codex, Jira, and Bitbucket evidence.
+      - name: Publish existing draft
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -25,6 +25,62 @@ Use a release tag or full commit SHA for `<ref>` in production. Installer exampl
 -SourceRepoUrl 'https://github.com/chiendao1808/atlassian-mcp.git'
 ```
 
+## Release artifacts
+
+GitHub releases provide amd64 assets only:
+
+- `atlassian-mcp_<version>_linux_amd64`
+- `atlassian-mcp_<version>_windows_amd64.exe`
+- `atlassian-mcp_<version>_linux_amd64.deb`
+- `atlassian-mcp_<version>_checksums.txt`
+- one SPDX JSON SBOM beside each delivery artifact
+
+Use the version without the leading `v` in file names:
+
+```bash
+VERSION='1.0.0'
+BASE_URL="https://github.com/chiendao1808/atlassian-mcp/releases/download/v${VERSION}"
+
+curl -fLO "${BASE_URL}/atlassian-mcp_${VERSION}_linux_amd64"
+curl -fLO "${BASE_URL}/atlassian-mcp_${VERSION}_linux_amd64.deb"
+curl -fLO "${BASE_URL}/atlassian-mcp_${VERSION}_checksums.txt"
+
+sha256sum -c --ignore-missing "atlassian-mcp_${VERSION}_checksums.txt"
+chmod +x "atlassian-mcp_${VERSION}_linux_amd64"
+./"atlassian-mcp_${VERSION}_linux_amd64" --version
+sudo install -m 0755 "atlassian-mcp_${VERSION}_linux_amd64" /usr/local/bin/atlassian-mcp
+```
+
+Install the Debian package instead when `/usr/bin/atlassian-mcp` is preferred:
+
+```bash
+sudo apt install "./atlassian-mcp_${VERSION}_linux_amd64.deb"
+atlassian-mcp --version
+```
+
+On Windows, verify the checksum before running the `.exe`:
+
+```powershell
+$Version = '1.0.0'
+$BaseUrl = "https://github.com/chiendao1808/atlassian-mcp/releases/download/v$Version"
+$Exe = "atlassian-mcp_${Version}_windows_amd64.exe"
+$Checksums = "atlassian-mcp_${Version}_checksums.txt"
+
+Invoke-WebRequest -Uri "$BaseUrl/$Exe" -OutFile $Exe
+Invoke-WebRequest -Uri "$BaseUrl/$Checksums" -OutFile $Checksums
+
+$Expected = ((Select-String -Path $Checksums -Pattern " $([regex]::Escape($Exe))$").Line -split '\s+')[0].ToLowerInvariant()
+$Actual = (Get-FileHash -Algorithm SHA256 -Path $Exe).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "checksum mismatch for $Exe" }
+
+.\$Exe --version
+```
+
+SHA-256 checksums detect accidental or post-selection file changes, but they do
+not prove publisher identity. SBOM files list packaged components for audit and
+vulnerability review; they are not installers. The source-build installers
+remain supported, and their existing `--binary` / `-Binary` arguments can
+install a downloaded release binary without cloning the repository.
 
 ## Build and run
 

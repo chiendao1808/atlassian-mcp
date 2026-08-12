@@ -8,9 +8,14 @@ Date: 2026-08-11
 
 ## Status
 
-Active - implementation is in place and local focused checks passed. GitHub-
-hosted artifact validation, protected release approval, and external same-tag
-compatibility gates have not run.
+Active - release-ID draft validation/publish fix is in place and local static
+checks passed. A user-directed temporary diagnostic bypass disables Debian
+package generation and Debian tag draft validation, allowing a hosted
+no-Debian tag/draft workflow test. This is not the production release contract:
+Debian generation, Debian SBOM expectations, and `.deb` checks must be restored
+before an actual release. GitHub-hosted artifact validation, protected release
+approval, and external same-tag compatibility gates have not run after this
+fix.
 
 ## Outcome
 
@@ -213,8 +218,8 @@ responses must not be placed in the workflow, release assets, or public logs.
   assets.
 - The workflow uses Go `1.25.x`, pins third-party actions and release tools to
   reviewed immutable versions, and grants `contents: write` only to the jobs
-  that create/update the GitHub release. Pull-request jobs remain read-only and
-  never run with `pull_request_target`.
+  that create, list, validate, or update draft GitHub releases. Pull-request
+  jobs remain read-only and never run with `pull_request_target`.
 - The tag must match `v<semantic-version>`. `v` is removed for binary/package
   version output; invalid tags fail before GoReleaser runs.
 - Existing source-build installation remains compatible. README release
@@ -294,8 +299,8 @@ responses must not be placed in the workflow, release assets, or public logs.
   unexpected uploadable artifacts or publishers are rejected even when their
   names do not start with `atlassian-mcp_`.
 - [x] CR-004: remove unnecessary `actions: write` from
-  `validate-draft-ubuntu`; it keeps `contents: read` and uses the default
-  artifact upload behavior.
+  `validate-draft-ubuntu`; superseded on 2026-08-12 by the user-approved
+  `contents: write` scope needed for draft release listing by release ID.
 - [x] Fix GitHub Actions run 31509587046 Ubuntu ShellCheck failure by replacing
   the Bash installer test's `grep | wc -l` count pipeline with a
   ShellCheck-clean `grep -F -c` count that still treats no matches as zero.
@@ -306,6 +311,30 @@ responses must not be placed in the workflow, release assets, or public logs.
 - [x] Fix the hosted Syft download failure by changing the shared
   `SYFT_VERSION` workflow env from `1.29.0` to the existing release tag
   `v1.29.0`, which feeds both current `download-syft` call sites.
+- [x] Temporarily comment out the GoReleaser Debian nFPM block, Debian
+  checksum entry, and Debian SBOM entry at the user's request to diagnose the
+  hosted Ubuntu snapshot failure.
+- [x] Temporarily remove Debian package and Debian SBOM expectations from the
+  snapshot artifact inventory and `validate-snapshot-ubuntu` job while keeping
+  raw Linux, Windows, checksum, and binary SBOM checks.
+- [x] Leave the tag-only draft and release validation jobs unchanged so any tag
+  release remains blocked until the Debian package path is restored.
+- [x] Fix GitHub Actions run 31554869192 `Validate draft on Ubuntu` failure by
+  passing the explicit repository to all no-checkout GitHub CLI release calls:
+  Ubuntu draft download, Windows draft download, publish re-download, and
+  publish edit.
+- [x] Fix GitHub Actions run 31555579728 draft validator failures by replacing
+  release-by-tag draft access with exact-one draft release-ID lookup, paginated
+  asset-ID inventory checks, asset-ID downloads, and a release-ID REST publish
+  patch.
+- [x] Temporarily comment Debian `.deb` and Debian SBOM expectations out of
+  both tag draft validators, and comment the Ubuntu draft `.deb`
+  metadata/content/install checks, at the user's request. Keep release-ID and
+  asset-ID validation, checksum validation, binary SBOM parsing, raw Linux,
+  Windows executable, strict inventory, and protected publish checks intact.
+- [x] Fix the hosted workflow parser failure caused by trailing commas after
+  the active Windows binary-SBOM entry in both PowerShell draft-validation
+  `$expectedFiles` arrays while Debian SBOM lines are temporarily commented.
 - [ ] Record automated job URLs and external evidence links in **Validation**
   and **Result**. Keep the plan active if a first tagged release has not yet
   passed all gates.
@@ -336,8 +365,9 @@ responses must not be placed in the workflow, release assets, or public logs.
   compatibility. Mitigation: separate job evidence from protected external
   gates and require same-tag organizational/staging records.
 - Risk: untrusted pull-request code obtains release permissions. Mitigation:
-  use `pull_request`, keep validation permissions read-only, condition tag-only
-  jobs, and scope `contents: write` narrowly.
+  use `pull_request`, keep pull-request and snapshot validation permissions
+  read-only, condition release operations on tag-only jobs, and scope
+  `contents: write` narrowly.
 - Risk: a release publishes before environment protection is configured.
   Mitigation: repository administrators configure required reviewers before
   enabling the `v*` trigger; verify protection with a harmless pre-release tag
@@ -424,9 +454,44 @@ responses must not be placed in the workflow, release assets, or public logs.
   (`internal_type` 28), and the checksum manifest (`internal_type` 12).
   Unexpected manifest entries are rejected even when their names do not start
   with `atlassian-mcp_`.
-- 2026-08-11: `validate-draft-ubuntu` does not need `actions: write`; the job
-  retains only `contents: read` while uploading its validation manifest through
-  the standard artifact upload step.
+- 2026-08-11: Superseded on 2026-08-12: `validate-draft-ubuntu` no longer
+  retains only `contents: read`; both draft validators now use the
+  user-approved `contents: write` scope to list draft releases by release ID.
+- 2026-08-12: At the user's request, temporarily disable Debian package
+  generation and snapshot-only Debian validation to isolate the hosted Ubuntu
+  failure. This is not a release-contract change; restore the commented
+  GoReleaser Debian package, checksum, SBOM entries, and snapshot validations
+  after diagnosis. Tag-only draft/release validation remains intentionally
+  unchanged and therefore blocks releases while Debian assets are disabled.
+- 2026-08-12: GitHub Actions run 31554869192 failed in `Validate draft on
+  Ubuntu` because `validate-draft-ubuntu`, `validate-draft-windows`, and
+  `publish-release` do not run `actions/checkout`, so GitHub CLI cannot infer
+  the repository from `.git`. Keep those jobs checkout-free and pass
+  `--repo` from `GITHUB_REPOSITORY` on the four `gh release` callers instead.
+- 2026-08-12: GitHub Actions run 31555579728 showed `Create draft release`
+  succeeded but both draft validators failed with `release not found`; passing
+  `--repo` was insufficient because tag-based release download resolves
+  published releases, not draft releases.
+- 2026-08-12: The user approved scoped validator permission elevation to
+  `contents: write` for `validate-draft-ubuntu` and `validate-draft-windows`
+  only, so their `GITHUB_TOKEN` can list the intended draft release. Other job
+  permissions remain unchanged.
+- 2026-08-12: Draft validation and protected publication resolve exactly one
+  draft release by `draft == true` and exact `GITHUB_REF_NAME`, enumerate all
+  release and asset pages, require the exact expected asset names, download by
+  asset ID, and publish with a release-ID REST `PATCH` that sets only `draft`
+  to `false`.
+- 2026-08-12: At the user's request, extend the temporary Debian bypass from
+  snapshot validation to tag draft validation so hosted run 31561263646 can be
+  retested against the current five-asset draft. Keep the Debian lines
+  commented in place as the restoration map. Restore Debian package generation,
+  Debian SBOM expectations, draft `.deb` checks, and the production seven-asset
+  contract before any actual release.
+- 2026-08-12: PowerShell array entries cannot keep a trailing comma before a
+  commented Debian SBOM line. During the temporary Debian bypass, the active
+  Windows binary-SBOM entry is the final `$expectedFiles` element in both
+  Windows draft validators; when restoring the commented Debian SBOM item, add
+  that comma back to the Windows SBOM entry in the same edit.
 
 Promote a lasting release-support policy to `docs/decisions/` only if the
 implemented behavior establishes a broader architectural rule beyond this
@@ -562,6 +627,62 @@ Local validation on Windows:
 - `goreleaser check` passed after the Syft tag fix.
 - `git diff --check` passed after the Syft tag fix with line-ending warnings
   only for the edited workflow and plan files.
+- A temporary Debian snapshot bypass was applied on 2026-08-12 for diagnosis:
+  `.goreleaser.yaml` has the Debian nFPM, checksum, and SBOM entries commented
+  out, and the snapshot-only workflow path no longer expects or checks `.deb`
+  or Debian SBOM assets. The tag-only draft/release validation path was left
+  unchanged and is expected to block any tag release until Debian artifacts are
+  restored.
+- `go run github.com/goreleaser/goreleaser/v2@v2.17.1 check` passed after the
+  temporary Debian snapshot bypass; the local Go toolchain downloaded and used
+  Go `1.26.5` because GoReleaser v2.17.1 now requires it.
+- `git diff --check` passed after the temporary Debian snapshot bypass with
+  line-ending warnings only for the edited workflow, GoReleaser config, and
+  active plan files.
+- Targeted workflow search confirmed remaining Debian references are only in
+  tag-only draft validation, so tag releases remain intentionally blocked while
+  Debian generation is disabled.
+- GitHub Actions run 31554869192 failed before draft-asset validation with
+  `fatal: not a git repository` at `gh release download`. The workflow now
+  supplies `--repo` from `GITHUB_REPOSITORY` on the Ubuntu and Windows draft
+  downloads, the protected publish re-download, and the protected publish edit;
+  a hosted rerun is still required to prove these no-checkout GitHub CLI calls.
+- GitHub Actions run 31555579728 created the draft release successfully, then
+  both draft validators failed with `release not found`. The root cause is the
+  release-by-tag draft access path: draft releases must be selected from the
+  release list by release ID before assets can be inventoried or downloaded.
+- Static workflow invariant check passed after the release-ID fix: no
+  `gh release download` or `gh release edit` commands remain, both draft
+  validators have `contents: write`, paginated release lookup and asset-ID API
+  use are present, Windows downloads use `Invoke-WebRequest -OutFile`, publish
+  uses a REST `PATCH` with `draft=false`, and tag draft validation still expects
+  Debian assets while the temporary Debian bypass remains snapshot-only.
+- `git diff --check` passed after the release-ID fix with the existing Windows
+  checkout line-ending warning only for `.github/workflows/release.yml`.
+- Static workflow invariant check passed after the temporary tag draft Debian
+  bypass: the Ubuntu draft-download list, Ubuntu draft validation list, Windows
+  draft-download list, and Windows executable-validation list keep Debian
+  `.deb` and Debian SBOM entries only as comments; the Ubuntu draft `.deb`
+  metadata/content/install commands are commented; the Ubuntu draft validation
+  step no longer says `deb`; checksum, binary SBOM, raw Linux, Windows
+  executable, strict asset-inventory, release-ID/asset-ID, and protected
+  publish logic remain active.
+- A second targeted workflow static check confirmed no active Debian package
+  validation command remains in the draft Ubuntu block while those commands
+  stay commented as the restoration map.
+- `git diff --check` passed after the temporary tag draft Debian bypass with
+  the existing Windows checkout line-ending warning only for
+  `.github/workflows/release.yml` and
+  `docs/plans/active/release-amd64-artifacts.md`.
+- PowerShell Core (`pwsh`) is unavailable locally. A Windows PowerShell parser
+  static check passed for the two edited draft-validation `$expectedFiles`
+  snippets, confirmed no trailing comma remains before the commented Debian
+  SBOM lines, and confirmed both restoration comments mention adding the
+  Windows SBOM comma back.
+- `git diff --check` passed after the PowerShell trailing-comma fix with the
+  existing Windows checkout line-ending warning only for
+  `.github/workflows/release.yml` and
+  `docs/plans/active/release-amd64-artifacts.md`.
 
 Local limitations and remaining proof:
 
@@ -583,6 +704,12 @@ Local limitations and remaining proof:
   Codex, Jira Server 6.4.14, and Bitbucket Server 5.10.2 evidence have not run.
 - The exact GitHub Actions concurrency behavior, artifact upload/download, and
   post-approval re-download must still be proven by a hosted tag workflow run.
+- GitHub Actions run 31555579728 must be rerun on hosted runners to confirm the
+  release-ID and asset-ID API path can validate the intended draft and reach
+  the already-intentional Debian tag-validation block while Debian generation
+  remains disabled.
+- A hosted workflow rerun is still required to prove GitHub's YAML-to-pwsh
+  execution path accepts the corrected Windows draft-validation arrays.
 
 ## Definition Of Done
 

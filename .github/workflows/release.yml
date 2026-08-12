@@ -132,11 +132,9 @@ jobs:
           cat > .release-expected-assets <<EOF
           atlassian-mcp_${version}_linux_amd64
           atlassian-mcp_${version}_windows_amd64.exe
-          atlassian-mcp_${version}_linux_amd64.deb
           atlassian-mcp_${version}_checksums.txt
           atlassian-mcp_${version}_linux_amd64.sbom.json
           atlassian-mcp_${version}_windows_amd64.sbom.json
-          atlassian-mcp_${version}_linux_amd64.deb.sbom.json
           EOF
           sed -i 's/^ *//' .release-expected-assets
           # Check every manifest entry, not just names with the release prefix.
@@ -146,9 +144,7 @@ jobs:
               (.type == "Metadata" and .internal_type == 35 and .name == "metadata.json")
               or (.type == "Binary" and .internal_type == 4 and .extra.ID == "atlassian-mcp" and (.name == "atlassian-mcp" or .name == "atlassian-mcp.exe"))
               or (.type == "Binary" and .internal_type == 2 and .extra.ID == "raw-binaries" and (.name == expected("linux_amd64") or .name == expected("windows_amd64.exe")))
-              or (.type == "Linux Package" and .internal_type == 6 and .extra.ID == "deb" and .name == expected("linux_amd64.deb"))
               or (.type == "SBOM" and .internal_type == 28 and .extra.ID == "binary-sboms" and (.name == expected("linux_amd64.sbom.json") or .name == expected("windows_amd64.sbom.json")))
-              or (.type == "SBOM" and .internal_type == 28 and .extra.ID == "deb-sbom" and .name == expected("linux_amd64.deb.sbom.json"))
               or (.type == "Checksum" and .internal_type == 12 and .name == expected("checksums.txt"));
             .[] | select(ok | not)
           ' dist/artifacts.json > .release-unexpected-artifacts
@@ -160,7 +156,6 @@ jobs:
             def expected($suffix): "atlassian-mcp_\($version)_\($suffix)";
             .[] | select(
               (.type == "Binary" and .internal_type == 2 and .extra.ID == "raw-binaries")
-              or (.type == "Linux Package" and .extra.ID == "deb")
               or (.type == "SBOM")
               or (.type == "Checksum")
             ) | .name
@@ -202,29 +197,25 @@ jobs:
           name: goreleaser-dist
           path: dist
 
-      - name: Validate Linux binary, deb, checksums, and SBOMs
+      - name: Validate Linux binary, checksums, and SBOMs
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
           linux_bins=(dist/atlassian-mcp_*_linux_amd64)
           windows_bins=(dist/atlassian-mcp_*_windows_amd64.exe)
-          debs=(dist/atlassian-mcp_*_linux_amd64.deb)
           checksums=(dist/atlassian-mcp_*_checksums.txt)
-          sboms=(dist/atlassian-mcp_*_linux_amd64.sbom.json dist/atlassian-mcp_*_windows_amd64.sbom.json dist/atlassian-mcp_*_linux_amd64.deb.sbom.json)
+          sboms=(dist/atlassian-mcp_*_linux_amd64.sbom.json dist/atlassian-mcp_*_windows_amd64.sbom.json)
           test "${#linux_bins[@]}" -eq 1
           test "${#windows_bins[@]}" -eq 1
-          test "${#debs[@]}" -eq 1
           test "${#checksums[@]}" -eq 1
-          test "${#sboms[@]}" -eq 3
+          test "${#sboms[@]}" -eq 2
           version="${linux_bins[0]#dist/atlassian-mcp_}"
           version="${version%_linux_amd64}"
           test -f "dist/atlassian-mcp_${version}_windows_amd64.exe"
-          test -f "dist/atlassian-mcp_${version}_linux_amd64.deb"
           test -f "dist/atlassian-mcp_${version}_checksums.txt"
           test -f "dist/atlassian-mcp_${version}_linux_amd64.sbom.json"
           test -f "dist/atlassian-mcp_${version}_windows_amd64.sbom.json"
-          test -f "dist/atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
           unexpected="$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.rpm' -o -name '*darwin*' -o -name '*arm64*' \) -print)"
           test -z "$unexpected"
           (cd dist && sha256sum -c "$(basename "${checksums[0]}")")
@@ -233,11 +224,6 @@ jobs:
           done
           chmod +x "${linux_bins[0]}"
           test "$("${linux_bins[0]}" --version)" = "atlassian-mcp ${version}"
-          test "$(dpkg-deb --field "${debs[0]}" Maintainer)" = "chiendao1808 <chiendao1808@gmail.com>"
-          test "$(dpkg-deb --field "${debs[0]}" License)" = "MIT"
-          dpkg-deb --contents "${debs[0]}" | grep -E '/usr/bin/atlassian-mcp$'
-          sudo dpkg -i "${debs[0]}"
-          test "$(atlassian-mcp --version)" = "atlassian-mcp ${version}"
 
   validate-snapshot-windows:
     name: Validate snapshot on Windows
@@ -325,14 +311,41 @@ jobs:
     runs-on: ubuntu-latest
     needs: draft-release
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Download draft assets
-        run: gh release download "${GITHUB_REF_NAME}" --dir dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected_names=(
+            "atlassian-mcp_${version}_linux_amd64"
+            "atlassian-mcp_${version}_windows_amd64.exe"
+            # Temporary Debian bypass: restore these before an actual release.
+            # "atlassian-mcp_${version}_linux_amd64.deb"
+            "atlassian-mcp_${version}_checksums.txt"
+            "atlassian-mcp_${version}_linux_amd64.sbom.json"
+            "atlassian-mcp_${version}_windows_amd64.sbom.json"
+            # "atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+          )
+          mkdir -p dist
+          # Draft releases are invisible to the release-by-tag endpoint, so resolve the draft by ID.
+          mapfile -t release_ids < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.draft == true and .tag_name == \"${GITHUB_REF_NAME}\") | .id")
+          test "${#release_ids[@]}" -eq 1
+          release_id="${release_ids[0]}"
+          mapfile -t asset_rows < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" --jq '.[] | "\(.name)\t\(.id)"')
+          printf '%s\n' "${expected_names[@]}" | sort > expected-assets.txt
+          printf '%s\n' "${asset_rows[@]}" | cut -f1 | sort > actual-assets.txt
+          diff -u expected-assets.txt actual-assets.txt
+          for name in "${expected_names[@]}"; do
+            asset_id="$(printf '%s\n' "${asset_rows[@]}" | awk -F '\t' -v name="$name" '$1 == name { print $2 }')"
+            test -n "$asset_id"
+            gh api -H "Accept: application/octet-stream" "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "dist/$name"
+          done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate Linux binary, deb, checksums, and SBOMs
+      - name: Validate Linux binary, checksums, and SBOMs
         shell: bash
         run: |
           set -euo pipefail
@@ -341,11 +354,12 @@ jobs:
           expected=(
             "dist/atlassian-mcp_${version}_linux_amd64"
             "dist/atlassian-mcp_${version}_windows_amd64.exe"
-            "dist/atlassian-mcp_${version}_linux_amd64.deb"
+            # Temporary Debian bypass: restore these before an actual release.
+            # "dist/atlassian-mcp_${version}_linux_amd64.deb"
             "dist/atlassian-mcp_${version}_checksums.txt"
             "dist/atlassian-mcp_${version}_linux_amd64.sbom.json"
             "dist/atlassian-mcp_${version}_windows_amd64.sbom.json"
-            "dist/atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+            # "dist/atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
           )
           files=(dist/*)
           test "${#files[@]}" -eq "${#expected[@]}"
@@ -356,11 +370,12 @@ jobs:
           done
           chmod +x "dist/atlassian-mcp_${version}_linux_amd64"
           test "$(dist/atlassian-mcp_${version}_linux_amd64 --version)" = "atlassian-mcp ${version}"
-          test "$(dpkg-deb --field "dist/atlassian-mcp_${version}_linux_amd64.deb" Maintainer)" = "chiendao1808 <chiendao1808@gmail.com>"
-          test "$(dpkg-deb --field "dist/atlassian-mcp_${version}_linux_amd64.deb" License)" = "MIT"
-          dpkg-deb --contents "dist/atlassian-mcp_${version}_linux_amd64.deb" | grep -E '/usr/bin/atlassian-mcp$'
-          sudo dpkg -i "dist/atlassian-mcp_${version}_linux_amd64.deb"
-          test "$(atlassian-mcp --version)" = "atlassian-mcp ${version}"
+          # Temporary Debian bypass: restore package metadata/content/install checks before an actual release.
+          # test "$(dpkg-deb --field "dist/atlassian-mcp_${version}_linux_amd64.deb" Maintainer)" = "chiendao1808 <chiendao1808@gmail.com>"
+          # test "$(dpkg-deb --field "dist/atlassian-mcp_${version}_linux_amd64.deb" License)" = "MIT"
+          # dpkg-deb --contents "dist/atlassian-mcp_${version}_linux_amd64.deb" | grep -E '/usr/bin/atlassian-mcp$'
+          # sudo dpkg -i "dist/atlassian-mcp_${version}_linux_amd64.deb"
+          # test "$(atlassian-mcp --version)" = "atlassian-mcp ${version}"
           (
             cd dist
             printf '%s\n' "${expected[@]#dist/}" > ../validated-assets.txt
@@ -381,11 +396,53 @@ jobs:
     runs-on: windows-latest
     needs: draft-release
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Download draft assets
-        run: gh release download "${env:GITHUB_REF_NAME}" --dir dist
         shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $expectedFiles = @(
+            "atlassian-mcp_${version}_linux_amd64",
+            "atlassian-mcp_${version}_windows_amd64.exe",
+            # Temporary Debian bypass: restore these before an actual release.
+            # "atlassian-mcp_${version}_linux_amd64.deb",
+            "atlassian-mcp_${version}_checksums.txt",
+            "atlassian-mcp_${version}_linux_amd64.sbom.json",
+            "atlassian-mcp_${version}_windows_amd64.sbom.json"
+            # Temporary Debian bypass: restore this line and the Windows SBOM comma before an actual release.
+            # "atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+          )
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          function Get-PagedGitHubApi {
+            param([string] $Path)
+            $items = @()
+            for ($page = 1; ; $page++) {
+              $pageItems = @(gh api "${Path}?per_page=100&page=$page" | ConvertFrom-Json)
+              if ($pageItems.Count -eq 0) { break }
+              $items += $pageItems
+            }
+            $items
+          }
+          # Draft releases are invisible to the release-by-tag endpoint, so resolve the draft by ID.
+          $releases = @(Get-PagedGitHubApi "repos/$env:GITHUB_REPOSITORY/releases")
+          $matches = @($releases | Where-Object { $_.draft -eq $true -and $_.tag_name -eq $env:GITHUB_REF_NAME })
+          if ($matches.Count -ne 1) { throw "expected one draft release for $env:GITHUB_REF_NAME, found $($matches.Count)" }
+          $assets = @(Get-PagedGitHubApi "repos/$env:GITHUB_REPOSITORY/releases/$($matches[0].id)/assets")
+          $diff = @(Compare-Object -ReferenceObject @($expectedFiles | Sort-Object) -DifferenceObject @($assets | ForEach-Object { $_.name } | Sort-Object))
+          if ($diff.Count -ne 0) { throw 'draft asset inventory did not match expected files' }
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/octet-stream'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          foreach ($name in $expectedFiles) {
+            $asset = @($assets | Where-Object { $_.name -eq $name })
+            if ($asset.Count -ne 1) { throw "expected one asset named $name, found $($asset.Count)" }
+            Invoke-WebRequest -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset[0].id)" -Headers $headers -OutFile (Join-Path 'dist' $name)
+          }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -397,11 +454,13 @@ jobs:
           $expectedFiles = @(
             "atlassian-mcp_${version}_linux_amd64",
             "atlassian-mcp_${version}_windows_amd64.exe",
-            "atlassian-mcp_${version}_linux_amd64.deb",
+            # Temporary Debian bypass: restore these before an actual release.
+            # "atlassian-mcp_${version}_linux_amd64.deb",
             "atlassian-mcp_${version}_checksums.txt",
             "atlassian-mcp_${version}_linux_amd64.sbom.json",
-            "atlassian-mcp_${version}_windows_amd64.sbom.json",
-            "atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
+            "atlassian-mcp_${version}_windows_amd64.sbom.json"
+            # Temporary Debian bypass: restore this line and the Windows SBOM comma before an actual release.
+            # "atlassian-mcp_${version}_linux_amd64.deb.sbom.json"
           )
           $files = @(Get-ChildItem -Path dist -File)
           if ($files.Count -ne $expectedFiles.Count) { throw "expected $($expectedFiles.Count) assets, found $($files.Count)" }
@@ -435,8 +494,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p publish-dist
-          gh release download "${GITHUB_REF_NAME}" --dir publish-dist
           mapfile -t expected < validated-draft/validated-assets.txt
+          # Keep publication tied to the same exact draft release ID that supplied the validated assets.
+          mapfile -t release_ids < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq ".[] | select(.draft == true and .tag_name == \"${GITHUB_REF_NAME}\") | .id")
+          test "${#release_ids[@]}" -eq 1
+          release_id="${release_ids[0]}"
+          mapfile -t asset_rows < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" --jq '.[] | "\(.name)\t\(.id)"')
+          printf '%s\n' "${expected[@]}" | sort > expected-assets.txt
+          printf '%s\n' "${asset_rows[@]}" | cut -f1 | sort > actual-assets.txt
+          diff -u expected-assets.txt actual-assets.txt
+          for name in "${expected[@]}"; do
+            asset_id="$(printf '%s\n' "${asset_rows[@]}" | awk -F '\t' -v name="$name" '$1 == name { print $2 }')"
+            test -n "$asset_id"
+            gh api -H "Accept: application/octet-stream" "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "publish-dist/$name"
+          done
           files=(publish-dist/*)
           test "${#files[@]}" -eq "${#expected[@]}"
           for name in "${expected[@]}"; do
@@ -446,11 +517,17 @@ jobs:
             cd publish-dist
             sha256sum -c ../validated-draft/validated-assets.sha256
           )
+          echo "$release_id" > validated-draft/release-id.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # The protected environment approval records same-tag Claude, Codex, Jira, and Bitbucket evidence.
       - name: Publish existing draft
-        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(cat validated-draft/release-id.txt)"
+          test -n "$release_id"
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -F draft=false >/dev/null
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

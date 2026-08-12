@@ -25,27 +25,28 @@ archives:
       - binary
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
-nfpms:
-  - id: deb
-    ids:
-      - atlassian-mcp
-    package_name: atlassian-mcp
-    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.{{ .Format }}"
-    vendor: chiendao1808
-    homepage: https://github.com/chiendao1808/atlassian-mcp
-    maintainer: chiendao1808 <chiendao1808@gmail.com>
-    description: MCP stdio server for Atlassian Server tools.
-    license: MIT
-    formats:
-      - deb
-    bindir: /usr/bin
+# temporary: restore Debian packaging, checksum, and SBOM entries after the Ubuntu CI failure is diagnosed.
+# nfpms:
+#   - id: deb
+#     ids:
+#       - atlassian-mcp
+#     package_name: atlassian-mcp
+#     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.{{ .Format }}"
+#     vendor: chiendao1808
+#     homepage: https://github.com/chiendao1808/atlassian-mcp
+#     maintainer: chiendao1808 <chiendao1808@gmail.com>
+#     description: MCP stdio server for Atlassian Server tools.
+#     license: MIT
+#     formats:
+#       - deb
+#     bindir: /usr/bin
 
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
   algorithm: sha256
   ids:
     - raw-binaries
-    - deb
+#    - deb
 
 sboms:
   # Keep one SBOM per delivery artifact so release validation can match names exactly.
@@ -55,10 +56,10 @@ sboms:
       - raw-binaries
     documents:
       - "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.sbom.json"
-  - id: deb-sbom
-    artifacts: package
-    ids:
-      - deb
+#  - id: deb-sbom
+#    artifacts: package
+#    ids:
+#      - deb
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"

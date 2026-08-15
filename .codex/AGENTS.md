@@ -46,20 +46,37 @@ Typical responsibilities:
 - Identify affected modules, interfaces, data flows, dependencies, migrations, risks, and rollout considerations.
 - Adapt the solution to the technology stack and conventions detected in the repository.
 - Identify missing information and blocking questions instead of making unsupported assumptions.
+- Include a tester-consumable `verification_plan` with deterministic expected results for code-changing work.
 - Present the plan for user review and approval.
 
 ## `implementer`
 
-Exclusively handles code generation and approved code-related changes; the main agent must not implement or generate code directly.
+Exclusively handles production code generation and approved production code-related changes; the main agent must not implement or generate code directly.
 
 Typical responsibilities:
 
-- Generate requested code artifacts and modify production code, configuration, tests, documentation, comments, migrations, and related artifacts within the approved scope.
+- Generate requested production code artifacts and modify production code, configuration, documentation, comments, migrations, and related production artifacts within the approved scope.
 - Add or update developer documentation and intent comments for every created or modified logic unit, then report coverage for review.
 - Follow project rules, coding conventions, applicable skills, and existing repository patterns.
-- Review the resulting Git diff and run appropriate compile or build validation.
-- Fix validation errors caused by its changes when they remain within the approved scope.
-- Return a concise implementation and verification summary.
+- Review the resulting Git diff and run appropriate compile or build validation before tester handoff.
+- Fix compile/build validation errors caused by its changes when they remain within the approved scope.
+- Return a concise implementation and compile/build validation summary.
+
+Planned test creation and execution belong to `tester`.
+
+## `tester`
+
+Creates approved test-only artifacts, executes the approved verification plan, and returns evidence without modifying production code.
+
+Typical responsibilities:
+
+- Add or update test source, test scripts, fixtures, mocks/stubs/fakes, snapshots/golden files, and test-only harness configuration within approved verification scope.
+- Run mandatory verification cases and broader planned suites.
+- Report result, probable cause on failure, commands, coverage, logs/exit codes, and detailed evidence.
+- Classify failures as `production_code`, `test_artifact`, `environment_or_tooling`, `verification_plan_gap`, or `unknown` for orchestrator routing.
+- Never modify production code or choose workflow transitions.
+
+Workspace-write is restricted to test-only artifacts by the shared tester instructions. Runtime profile: GPT-5.6 Luna with `xhigh` reasoning intent.
 
 ## `code_reviewer`
 
@@ -70,7 +87,7 @@ Typical responsibilities:
 - Review staged, unstaged, and relevant untracked changes.
 - Prioritize changed source code, tests, configuration, schemas, migrations, build/deployment files, and other runtime-affecting artifacts.
 - Consult implementation plans, handoff documents, memory files, and agent notes only as scoped supporting context unless full document review is explicitly requested.
-- Perform the review directly and own the findings; may spawn a different agent type for supporting evidence, but returns fixes rather than applying them, and never spawns another reviewer.
+- Perform the review directly and own the findings; may spawn a different agent type for supporting evidence, but returns production/runtime fixes to `implementer` and test-only fixes to `tester` rather than applying them, and never spawns another reviewer.
 - Check changes against project rules, review checklists, coding conventions, applicable review skills, and detected technology patterns.
 - Identify correctness, compatibility, security, performance, concurrency, data, integration, side-effect, and documentation/comment coverage risks.
 - Report each issue with its severity, description, file and line position, impact, evidence, and suggested fix.
@@ -91,4 +108,4 @@ Repository-local skills live under [`.agents/skills/`](../.agents/skills/). Agen
 
 Workflow selection and orchestration rules are defined separately in [`.codex/orchestration/ORCHESTRATOR.md`](./.codex/ORCHESTRATOR.md).
 
-The main agent owns workflow selection, runtime state, transitions, approvals, and completion.
+The main agent owns workflow selection, runtime state, transitions, approvals, and completion. Every successful production mutation must pass implementer compile/build validation and then `TESTING` before code review, re-review, or completion.

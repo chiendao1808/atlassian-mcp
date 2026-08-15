@@ -42,13 +42,38 @@ When the user or parent supplies an implementation plan, fix plan, remediation p
 6. Create a replacement plan only when the supplied plan is materially incompatible, unsafe, obsolete, contradictory, or missing core decisions. Record why reuse was rejected.
 7. User approval remains mandatory before any workspace mutation, even when the supplied plan is reused unchanged.
 
+For code-changing work, a reusable plan must also provide a tester-consumable verification plan with deterministic expected results. When production decisions remain valid but only verification detail is missing, prefer a targeted planner revision instead of replacing the whole plan.
+
 ## Code Generation and Mutation Boundary
 
-- `implementer` is the exclusive agent for generating code and for modifying code, configuration, tests, schemas, migrations, build files, infrastructure-as-code, and code-adjacent documentation or comments.
-- The main agent may clarify requirements, select workflows, manage state, present approvals, and summarize results, but must not generate implementation code or perform code-related writes itself.
+- `implementer` is the exclusive agent for generating and modifying production code, runtime configuration, schemas, migrations, build/dependency files, infrastructure-as-code, and production code-adjacent documentation or comments.
+- `tester` is the exclusive agent for approved test-only source, test scripts, fixtures, mocks/stubs/fakes, snapshots/golden files, test-only harness configuration, and test reports/evidence.
+- The main agent may clarify requirements, select workflows, manage state, present approvals, and summarize results, but must not generate implementation or test code or perform code-related writes itself.
 - This boundary applies to direct requests, quick fixes, feature implementation, bug fixes, remediation, validation fixes, and code examples intended as deliverable output.
-- For non-mutating code generation, dispatch `implementer` with the requested output scope. For workspace writes, also provide the approved plan and exact approved scope.
-- Never bypass `implementer` because a change is small, local, mechanical, or time-sensitive.
+- For non-mutating production code generation, dispatch `implementer` with the requested output scope. For workspace writes, also provide the approved plan and exact approved scope.
+- Never bypass the appropriate write-owning agent because a change is small, local, mechanical, or time-sensitive.
+
+## Testing Strategy Contract
+
+For every workflow path that mutates production code:
+
+- The approved plan must include or reference a `verification_plan` with stable case IDs and deterministic expected results for mandatory behavioral verification.
+- `implementer` owns diff sanity checking plus compile/build validation; it does not create or run the planned behavioral test suite.
+- `tester` materializes approved test-only artifacts, executes the approved verification plan, and returns result/cause/evidence to the orchestrator.
+- Every successful production mutation follows `IMPLEMENTATION/REMEDIATION -> TESTING -> CODE_REVIEW/RE_REVIEW`; compile/build failure remains in the current implementer-owned state.
+- Test-only remediation remains tester-owned and must still complete `TESTING` successfully before review/re-review.
+
+Tester dispatches must include or reference the approved verification plan, `testing_source_state`, changed-file scope, implementation/remediation report, applicable repository rules/skills, and any approved test-only review findings.
+
+Route tester failures by evidence classification:
+
+- `production_code` -> `IMPLEMENTATION` for initial implementation or `REMEDIATION` for remediation.
+- `test_artifact` -> `TESTING` with approved test-only correction scope.
+- `environment_or_tooling` -> `BLOCKED`, then `resume_testing` after resolution.
+- `verification_plan_gap` -> `BLOCKED`, resolve through clarification/planner as appropriate, then `resume_testing`.
+- `unknown` -> `BLOCKED` and gather additional evidence before selecting a mutation owner.
+
+Do not automatically treat every failed test as a production-code defect, and preserve the original failing evidence when tester-owned artifacts are corrected and rerun.
 
 ## Workflow Selection
 
@@ -118,7 +143,7 @@ preferred_model: sonnet
 preferred_reasoning_effort: medium
 ```
 
-The output must be a concise quick-fix brief rather than an architecture-oriented implementation plan. A lightweight path still requires explicit scope approval, implementer verification, and code review.
+The output must be a concise quick-fix brief rather than an architecture-oriented implementation plan. A lightweight path still requires explicit scope approval, implementer compile/build validation, tester verification, and code review.
 
 ### Choose the full planning path
 
@@ -218,6 +243,8 @@ For each state, provide the assigned agent with a self-contained task containing
 - Expected output contract.
 - Allowed transition events.
 
+For `TESTING`, also provide the approved `verification_plan` reference, `testing_source_state`, changed files, implementation/remediation report reference, and any approved test-only findings to remediate.
+
 Use canonical agent types from `CLAUDE.md` and `.claude/agents/*.md`.
 
 Dispatch `code_reviewer` once per review state and require it to perform the review directly in its existing thread. It may spawn a different agent type (such as `explorer`) for supporting evidence, or return uncertain evidence to the orchestrator for an explicit `explorer` dispatch when the workflow provides that state; it must not spawn another `code_reviewer` (blocked by the recursion hook) or delegate the review judgment. In every review dispatch, instruct it to prioritize changed source code and runtime-affecting artifacts. Treat plans, handoffs, memory-bank files, and agent notes as secondary context to consult selectively unless the user explicitly requests full document review.
@@ -250,7 +277,7 @@ The orchestrator must record:
 
 If implementation expands beyond the approved scope, return to the relevant review or approval state.
 
-Every implementation or remediation approval must include documentation and intent-comment coverage for the changed logic. The implementer must return `documentation_updates` and `comment_coverage`; missing coverage blocks successful self-verification unless a repository rule explicitly prohibits that documentation form and an equivalent approved form is used.
+Every implementation or remediation approval must include documentation and intent-comment coverage for the changed logic. The implementer must return `documentation_updates`, `comment_coverage`, and successful `compile_validation`. The approved verification scope must cover tester-owned artifacts required by the verification plan; missing mandatory tester evidence blocks completion.
 
 ## Failure, Timeout, and Blocked Handling
 
@@ -258,8 +285,9 @@ Every implementation or remediation approval must include documentation and inte
 - If an indexed MCP or specialized connector fails, use the documented fallback and record the limitation in metadata.
 - If a spawned explorer times out, the parent continues targeted exploration and does not spawn a replacement explorer for the same task.
 - If an implementer finds an out-of-scope issue, preserve the current changes, record the blocker, and return control to the orchestrator.
+- If tester reports `environment_or_tooling`, `verification_plan_gap`, or `unknown`, route to the workflow's `BLOCKED` handling instead of guessing or mutating production code.
 - If a review finding is uncertain, gather evidence before routing it to remediation.
-- Never transition to `COMPLETED` while a required approval, blocking finding, failed verification, unresolved mandatory artifact, or missing documentation/comment coverage remains.
+- Never transition to `COMPLETED` while a required approval, blocking finding, failed compile/build, failed or blocked mandatory tester verification, unresolved mandatory artifact, or missing documentation/comment coverage remains.
 
 ## Completion
 
@@ -267,7 +295,9 @@ A workflow is complete only when its terminal-state guard is satisfied and the r
 
 - Final outcome summary.
 - Relevant artifact references.
-- Verification and review status when applicable.
+- Compile/build, tester verification, and review status when applicable.
 - Documentation updates and comment coverage for every created or modified logic unit.
 - Deferred issues or residual risks.
 - Final metadata and transition history.
+
+After any production mutation, a passing mandatory `test_report`/verification coverage is required before completion.

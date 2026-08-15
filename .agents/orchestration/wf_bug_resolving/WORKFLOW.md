@@ -13,8 +13,9 @@ The workflow separates verified bug facts from technical clues and root-cause hy
 
 - `req_analyzer`: extracts bug facts and reviews supplied fix or implementation plans for reuse.
 - `explorer`: traces affected code paths, dependencies, and possible blast radius.
-- `planner`: creates a plan only when needed, or revises a reviewed supplied plan using the selected complexity profile.
-- `implementer`: exclusively applies the approved fix, adds required documentation/comments, and performs self-verification.
+- `planner`: creates a plan only when needed, or revises a reviewed supplied plan using the selected complexity profile; code-changing plans include a tester-consumable `verification_plan`.
+- `implementer`: exclusively applies the approved production fix, adds required documentation/comments, and performs compile/build validation.
+- `tester`: creates approved test-only artifacts, executes the approved regression/functional verification plan, and returns result/cause/evidence.
 - `code_reviewer`: reviews the fix for regressions, side effects, and unresolved findings.
 
 ## Flow
@@ -75,7 +76,7 @@ The workflow separates verified bug facts from technical clues and root-cause hy
 +-------------+
 ```
 
-The supplied plan may bypass both planning states only when verified bug scope, root cause, risk, and validation are covered. Otherwise `planner` revises the existing plan or replaces it with explicit justification.
+The supplied plan may bypass both planning states only when verified bug scope, root cause, risk, and validation are covered. For code-changing work, validation must include a tester-consumable verification scope with deterministic expected results. Otherwise `planner` revises the existing plan or replaces it with explicit justification.
 
 ### Planning mode selection
 
@@ -153,49 +154,92 @@ The supplied plan may bypass both planning states only when verified bug scope, 
 +--------------------+  +----------------+
 ```
 
-### Implementation and self-verification
+### Implementation and testing
 
 ```text
 +----------------+<---------------------------+
 | IMPLEMENTATION |                            |
 +-------+--------+                            |
         |                                     |
-        | fix_ready                           | verification_failed
+        | fix_ready                           | production_failure
+        | compile_validation=passed           | source=IMPLEMENTATION
         v                                     |
-+-------------------+-------------------------+
-| SELF_VERIFICATION |
-+---------+---------+
-          |
-          | verification_passed
-          v
++---------+-----------------------------------+
+| TESTING |
++----+----+
+     |
+     | tests_passed
+     v
 +-------------+
 | CODE_REVIEW |
 +-------------+
 ```
 
+Compile/build failure remains in `IMPLEMENTATION`; it does not advance to `TESTING`. Behavioral regression/functional verification belongs to `tester`, not `implementer`.
+
+Tester-owned and blocked failures route separately:
+
+```text
++---------+<----------------------+
+| TESTING |                       |
++----+----+                       |
+     |                            | test_artifact_failure
+     | testing_blocked            |
+     v                            |
++---------+                       |
+| BLOCKED |-----------------------+
++---------+  resume_testing after blocker resolution
+```
+
+`testing_blocked` covers environment/tooling failures, verification-plan gaps, and unknown failures that require evidence before choosing a mutation owner. A `production_failure` returns to `IMPLEMENTATION` only for `source=IMPLEMENTATION`; failures discovered after production or test-only remediation route to `REMEDIATION`.
+
 ### Review and remediation
 
 ```text
-+-------------------+<--------------------------+
-| SELF_VERIFICATION |                           |
-+-------------------+                           | remediation_ready
-                                                |
-+-------------+                                 |
-| CODE_REVIEW |                                 |
-+------+------+                                 |
-       |                                        |
-  +----+--------------------+                   |
-  |                         |                   |
-  | review_accepted         | findings_found    |
-  v                         v                   |
-+-----------+         +-------------+           |
-| COMPLETED |         | REMEDIATION |-----------+
-+-----+-----+         +-------------+
++---------+<----------------------------------+
+| TESTING |                                   |
++---------+                                   | remediation_ready
+                                              | compile_validation=passed
+                                              |
++-------------+                               |
+| CODE_REVIEW |                               |
++------+------+                               |
+       |                                      |
+  +----+-------------------------+            |
+  |                              |            |
+  | review_accepted              | findings_found
+  |                              | (production/mixed)
+  v                              v            |
++-----------+              +-------------+    |
+| COMPLETED |              | REMEDIATION |----+
++-----+-----+              +-------------+
       |
       v
 +-----+
 | END |
 +-----+
+```
+
+Test-only review findings remain tester-owned without introducing a separate review event name:
+
+```text
++-------------+
+| CODE_REVIEW |
++------+------+ 
+       |
+       | findings_found
+       | (test-only)
+       v
++---------------------------+
+| TESTING                   |
+| source=TEST_REMEDIATION   |
++-------------+-------------+
+              |
+              | tests_passed
+              v
+        +-------------+
+        | CODE_REVIEW |
+        +-------------+
 ```
 
 ### Clarification routing
@@ -271,6 +315,20 @@ The supplied plan may bypass both planning states only when verified bug scope, 
 +--------------------+  +----------------+  +----------------+
 ```
 
+Testing-specific recovery adds:
+
+```text
++---------+
+| BLOCKED |
++----+----+
+     |
+     | resume_testing
+     v
++---------+
+| TESTING |
++---------+
+```
+
 ### Blocked-state cancellation
 
 ```text
@@ -314,7 +372,7 @@ The quick-fix brief should contain only:
 1. Confirmed defect and expected behavior.
 2. Exact change scope and likely files/symbols.
 3. Minimal implementation steps.
-4. Validation commands or checks.
+4. Validation commands or checks, with a compact tester-consumable verification plan for behavioral validation.
 5. A short risk and side-effect check.
 
 Preferred execution profile:
@@ -344,18 +402,18 @@ Use the canonical full planner profile for this path.
 
 Immediately move from `QUICK_FIX_PLANNING` to `FIX_PLANNING` if exploration or planning reveals an escalation condition. Do not preserve the lightweight profile merely to reduce latency.
 
-A simple planning path does **not** remove user approval, implementation self-verification, or code review.
+A simple planning path does **not** remove user approval, implementer compile/build validation, tester verification, or code review.
 
 ## Key Gates
 
 - The bug brief must distinguish facts, clues, hypotheses, and missing evidence.
 - Root-cause assessment must have evidence tied to an execution path, contract, state transition, data condition, configuration condition, or deterministic local defect.
 - Complexity and risk must be recorded before selecting a planning profile.
-- A reviewed supplied fix plan must be reused when it remains valid; new planning is not performed merely to restate it.
+- A reviewed supplied fix plan must be reused when it remains valid; new planning is not performed merely to restate it. Code-changing plans must include an executable verification scope for `tester`.
 - The quick-fix brief, reused plan, revised plan, or full fix plan and scope require explicit user approval.
-- All code generation and code-related writes must be performed by `implementer`, never by the main agent.
-- Every created or modified logic unit must have documentation and intent-comment coverage reported and verified before review acceptance.
-- The fix must pass diff and compile/build or focused verification.
-- Blocking review findings must be remediated and re-reviewed.
+- Production code-related writes must be performed by `implementer`; approved test-only writes and planned behavioral verification are owned by `tester`, never by the main agent.
+- Every created or modified production logic unit must have documentation and intent-comment coverage reported and verified before review acceptance.
+- The fix/remediation must pass compile/build validation before tester handoff, and mandatory `TESTING` must pass before review/re-review/completion.
+- Blocking review findings must be remediated, retested, and re-reviewed.
 
 The Markdown state model (`state-model.md`) is authoritative for state definitions, metadata expectations, execution profiles, transition events, and guards.

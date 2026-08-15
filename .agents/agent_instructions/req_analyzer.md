@@ -138,7 +138,7 @@ Required feature-analysis fields:
 - `codebase_clues` grouped by frontend, backend, data, messaging, cache, infrastructure, or other detected areas.
 - `assumptions`.
 - `open_questions` ordered by blocking impact.
-- `recommended_next_agent` such as `planner`, `designer`, `explorer`, or another configured specialist, with a brief reason.
+- `recommended_next_agent` such as `planner`, `uiux_designer`, `explorer`, or another configured specialist, with a brief reason.
 - `supplied_plan_review` when an implementation plan is present, including plan identity, review status, reusable scope, gaps, risks, and required revisions.
 - `plan_reuse_recommendation`: `reuse`, `revise_existing`, `replace`, or `not_applicable`.
 

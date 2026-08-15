@@ -1,8 +1,8 @@
 # State Model — Feature Development
 
-`name: wf_feature_development` · `schema_version: 1`
+`name: wf_feature_development` · `schema_version: 2`
 
-Deliver a clarified new feature or enhancement through exploration, optional design, approved planning, implementation, verification, and code review.
+Deliver a clarified new feature or enhancement through exploration, optional design, approved planning, implementation, tester verification, and code review.
 
 - **Initial state:** `REQUIREMENT_ANALYSIS`
 - **Terminal states:** `COMPLETED`, `CANCELLED`
@@ -16,12 +16,12 @@ Deliver a clarified new feature or enhancement through exploration, optional des
 | `REQUIREMENT_ANALYSIS` | `req_analyzer` | — | — |
 | `CLARIFICATION_REQUIRED` | `main` | — | — |
 | `CODEBASE_EXPLORATION` | `explorer` | — | — |
-| `DESIGN` | `designer` | — | — |
+| `DESIGN` | `uiux_designer` | — | — |
 | `DESIGN_REVIEW` | `main` | yes | — |
 | `PLANNING` | `planner` | — | — |
 | `PLAN_REVIEW` | `main` | yes | — |
 | `IMPLEMENTATION` | `implementer` | — | — |
-| `SELF_VERIFICATION` | `implementer` | — | — |
+| `TESTING` | `tester` | — | — |
 | `CODE_REVIEW` | `code_reviewer` | — | — |
 | `REMEDIATION` | `implementer` | — | — |
 | `BLOCKED` | `main` | — | — |
@@ -65,7 +65,7 @@ Locate implementation surfaces, execution paths, dependencies, repository rules,
 
 Produce an implementation-ready design specification or approved design artifact for UI/UX and interaction changes.
 
-- **Agent:** `designer`
+- **Agent:** `uiux_designer`
 - **Approval required:** no
 - **Expected outputs:** `design_spec`, `design_assumptions`, `design_questions`
 - **Allowed events:** `design_ready`, `blocked`
@@ -89,7 +89,7 @@ Create a codebase-grounded implementation plan, or revise a reviewed supplied pl
 
 - **Agent:** `planner`
 - **Approval required:** no
-- **Expected outputs:** `implementation_plan`, `plan_questions`, `requested_implementation_scope`
+- **Expected outputs:** `implementation_plan`, `verification_plan`, `plan_questions`, `requested_implementation_scope`
 - **Allowed events:** `plan_ready`, `clarification_needed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
@@ -100,7 +100,7 @@ Present the reused, revised, or newly created implementation plan and scope for 
 
 - **Agent:** `main`
 - **Approval required:** yes
-- **Expected outputs:** `plan_approval_status`, `approved_scope`
+- **Expected outputs:** `plan_approval_status`, `approved_scope`, `approved_verification_scope`
 - **Allowed events:** `approved`, `changes_requested`, `rejected`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
@@ -111,21 +111,22 @@ Implement only the approved plan and scope.
 
 - **Agent:** `implementer`
 - **Approval required:** no
-- **Expected outputs:** `changed_files`, `implementation_report`, `documentation_updates`, `comment_coverage`
-- **Allowed events:** `implementation_ready`, `blocked`
+- **Expected outputs:** `changed_files`, `implementation_report`, `documentation_updates`, `comment_coverage`, `compile_validation`
+- **Allowed events:** `implementation_ready`, `compile_failed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
 
-### `SELF_VERIFICATION`
+### `TESTING`
 
-Review the Git diff and run the narrowest appropriate compile or build validation.
+Create or update approved test-only artifacts, execute the approved verification plan, and return evidence without modifying production code.
 
-- **Agent:** `implementer`
+- **Agent:** `tester`
 - **Approval required:** no
-- **Expected outputs:** `diff_summary`, `verification_commands`, `verification_result`, `documentation_comment_check`
-- **Allowed events:** `verification_passed`, `verification_failed`, `blocked`
+- **Expected outputs:** `test_report`, `test_artifacts`, `test_execution_summary`, `failure_classification`, `verification_coverage`
+- **Allowed events:** `tests_passed`, `production_failure`, `test_artifact_failure`, `testing_blocked`
+- `testing_source_state` is `IMPLEMENTATION`, `REMEDIATION`, or `TEST_REMEDIATION`.
 - **Metadata · raw context:** `agent_outputs`
-- **Metadata · additional context:** `constraints`, `notes`
+- **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
 
 ### `CODE_REVIEW`
 
@@ -144,8 +145,8 @@ Fix accepted review findings within the approved remediation scope.
 
 - **Agent:** `implementer`
 - **Approval required:** no
-- **Expected outputs:** `remediated_findings`, `remediation_report`, `documentation_updates`, `comment_coverage`
-- **Allowed events:** `remediation_ready`, `blocked`
+- **Expected outputs:** `remediated_findings`, `remediation_report`, `documentation_updates`, `comment_coverage`, `compile_validation`
+- **Allowed events:** `remediation_ready`, `compile_failed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `constraints`, `notes`
 
@@ -156,13 +157,13 @@ Preserve context and resolve missing information, permission, tooling, or scope 
 - **Agent:** `main`
 - **Approval required:** no
 - **Expected outputs:** `blocker_resolution`, `resume_target`
-- **Allowed events:** `resume_analysis`, `resume_planning`, `resume_implementation`, `cancelled`
+- **Allowed events:** `resume_analysis`, `resume_planning`, `resume_implementation`, `resume_testing`, `cancelled`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
 
 ### `COMPLETED`
 
-Record the final implementation, verification, review, residual risks, and artifact references.
+Record the final implementation, verification, review, residual risks, and artifact references. When production code changed, completion requires successful compile/build evidence and a passing mandatory tester report.
 
 - **Agent:** `main`
 - **Approval required:** no
@@ -190,32 +191,39 @@ Every legal move. A transition may fire only when its guard holds; approval-gate
 | `REQUIREMENT_ANALYSIS` | `requirements_ready` | `goal_scope_and_acceptance_criteria_sufficient` | `CODEBASE_EXPLORATION` |
 | `CODEBASE_EXPLORATION` | `design_required` | `ui_ux_or_interaction_design_required` | `DESIGN` |
 | `CODEBASE_EXPLORATION` | `design_not_required` | `implementation_surfaces_identified` | `PLANNING` |
-| `CODEBASE_EXPLORATION` | `provided_plan_ready` | `supplied_plan_review_recommends_reuse_and_exploration_confirms_scope_and_design_not_required` | `PLAN_REVIEW` |
+| `CODEBASE_EXPLORATION` | `provided_plan_ready` | `supplied_plan_review_recommends_reuse_and_exploration_confirms_scope_and_design_not_required_and_verification_scope_complete` | `PLAN_REVIEW` |
 | `DESIGN` | `design_ready` | `design_spec_complete` | `DESIGN_REVIEW` |
 | `DESIGN_REVIEW` | `changes_requested` | `user_requested_design_changes` | `DESIGN` |
 | `DESIGN_REVIEW` | `approved` | `explicit_user_design_approval` | `PLANNING` |
-| `DESIGN_REVIEW` | `provided_plan_ready` | `explicit_user_design_approval_and_supplied_plan_covers_approved_design` | `PLAN_REVIEW` |
-| `PLANNING` | `plan_ready` | `no_blocking_plan_questions` | `PLAN_REVIEW` |
+| `DESIGN_REVIEW` | `provided_plan_ready` | `explicit_user_design_approval_and_supplied_plan_covers_approved_design_and_verification_scope_complete` | `PLAN_REVIEW` |
+| `PLANNING` | `plan_ready` | `no_blocking_plan_questions_and_verification_plan_complete` | `PLAN_REVIEW` |
 | `PLAN_REVIEW` | `changes_requested` | `user_requested_plan_changes` | `PLANNING` |
-| `PLAN_REVIEW` | `approved` | `explicit_user_plan_approval_and_scope_recorded` | `IMPLEMENTATION` |
+| `PLAN_REVIEW` | `approved` | `explicit_user_plan_approval_and_production_and_verification_scope_recorded` | `IMPLEMENTATION` |
 | `PLAN_REVIEW` | `rejected` | `user_rejected_plan` | `CANCELLED` |
-| `IMPLEMENTATION` | `implementation_ready` | `approved_changes_applied_with_documentation_and_comment_coverage` | `SELF_VERIFICATION` |
-| `SELF_VERIFICATION` | `verification_failed` | `failure_within_approved_scope` | `IMPLEMENTATION` |
-| `SELF_VERIFICATION` | `verification_passed` | `diff_reviewed_compile_or_build_passed_and_documentation_comment_coverage_confirmed` | `CODE_REVIEW` |
-| `CODE_REVIEW` | `findings_found` | `accepted_actionable_findings_present` | `REMEDIATION` |
+| `IMPLEMENTATION` | `compile_failed` | `compile_failure_within_approved_scope` | `IMPLEMENTATION` |
+| `IMPLEMENTATION` | `implementation_ready` | `approved_changes_applied_with_documentation_and_comment_coverage_and_compile_passed` | `TESTING` |
+| `TESTING` | `tests_passed` | `mandatory_verification_complete_and_test_report_passed` | `CODE_REVIEW` |
+| `TESTING` | `production_failure` | `testing_source_state_is_implementation` | `IMPLEMENTATION` |
+| `TESTING` | `production_failure` | `testing_source_state_is_remediation` | `REMEDIATION` |
+| `TESTING` | `production_failure` | `testing_source_state_is_test_remediation` | `REMEDIATION` |
+| `TESTING` | `test_artifact_failure` | `approved_test_only_correction_scope_available` | `TESTING` |
+| `TESTING` | `testing_blocked` | `testing_blocker_recorded` | `BLOCKED` |
+| `CODE_REVIEW` | `findings_found` | `accepted_actionable_production_or_mixed_findings_present` | `REMEDIATION` |
+| `CODE_REVIEW` | `findings_found` | `accepted_actionable_test_only_findings_present` | `TESTING` |
 | `CODE_REVIEW` | `review_accepted` | `no_blocking_findings_and_completion_artifacts_present` | `COMPLETED` |
-| `REMEDIATION` | `remediation_ready` | `accepted_findings_addressed_with_documentation_and_comment_coverage` | `SELF_VERIFICATION` |
+| `REMEDIATION` | `compile_failed` | `compile_failure_within_approved_scope` | `REMEDIATION` |
+| `REMEDIATION` | `remediation_ready` | `accepted_findings_addressed_with_documentation_and_comment_coverage_and_compile_passed` | `TESTING` |
 | `REQUIREMENT_ANALYSIS` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `CODEBASE_EXPLORATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `DESIGN` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `PLANNING` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `IMPLEMENTATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
-| `SELF_VERIFICATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `CODE_REVIEW` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `REMEDIATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `BLOCKED` | `resume_analysis` | `analysis_blocker_resolved` | `REQUIREMENT_ANALYSIS` |
 | `BLOCKED` | `resume_planning` | `planning_blocker_resolved` | `PLANNING` |
 | `BLOCKED` | `resume_implementation` | `implementation_blocker_resolved_and_scope_approved` | `IMPLEMENTATION` |
+| `BLOCKED` | `resume_testing` | `testing_blocker_resolved_and_verification_scope_authoritative` | `TESTING` |
 | `CLARIFICATION_REQUIRED` | `cancelled` | `user_cancelled` | `CANCELLED` |
 | `REQUIREMENT_ANALYSIS` | `cancelled` | `user_cancelled` | `CANCELLED` |
 | `DESIGN_REVIEW` | `cancelled` | `user_cancelled` | `CANCELLED` |
@@ -248,16 +256,28 @@ The orchestrator instantiates and maintains this structure per workflow run (per
     "exploration_report": null,
     "design_spec": null,
     "implementation_plan": null,
+    "verification_plan": null,
     "implementation_report": null,
     "documentation_updates": [],
     "comment_coverage": [],
+    "compile_validation": null,
+    "test_report": null,
+    "test_artifacts": [],
     "review_report": null
   },
   "approval": {
     "required": false,
     "status": "not_required",
     "requested_scope": [],
-    "approved_scope": []
+    "approved_scope": [],
+    "approved_verification_scope": []
+  },
+  "testing": {
+    "source_state": null,
+    "cycle": 0,
+    "max_cycles": 3,
+    "last_result": null,
+    "last_failure_classification": null
   },
   "execution": {
     "retry_count": 0,

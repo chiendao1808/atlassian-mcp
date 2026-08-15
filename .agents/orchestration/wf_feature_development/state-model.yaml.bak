@@ -118,7 +118,7 @@ states:
       - constraints
       - notes
   DESIGN:
-    agent: designer
+    agent: uiux_designer
     purpose: Produce an implementation-ready design specification or approved design artifact for UI/UX and interaction changes.
     expected_outputs:
     - design_spec

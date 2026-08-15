@@ -48,22 +48,37 @@ Creates an implementation-ready technical plan based on verified requirements an
 - Identify affected modules, interfaces, data flows, dependencies, migrations, risks, and rollout considerations.
 - Adapt the solution to the detected technology stack and conventions.
 - Identify missing information and blocking questions instead of making unsupported assumptions.
+- Include a tester-consumable `verification_plan` with deterministic expected results for code-changing work.
 - Present the plan for user review and approval.
 
 May create or update planning documents only in the workspace. Model: opus.
 
 ### `implementer`
 
-Exclusively handles code generation and approved code-related changes; the main agent must not implement or generate code directly.
+Exclusively handles production code generation and approved production code-related changes; the main agent must not implement or generate code directly.
 
-- Generate requested code artifacts and modify production code, configuration, tests, documentation, comments, and migrations within the approved scope.
+- Generate requested production code artifacts and modify production code, configuration, documentation, comments, and migrations within the approved scope.
 - Add or update developer documentation and intent comments for every created or modified logic unit, then report coverage.
 - Follow project rules, coding conventions, applicable skills, and existing repository patterns.
-- Review the resulting Git diff and run appropriate compile/build validation.
-- Fix validation errors caused by its changes when they remain within the approved scope.
-- Return a concise implementation and verification summary.
+- Review the resulting Git diff and run appropriate compile/build validation before tester handoff.
+- Fix compile/build validation errors caused by its changes when they remain within the approved scope.
+- Return a concise implementation and compile/build validation summary.
+
+Planned test creation and execution belong to `tester`.
 
 Workspace-write. Model: sonnet.
+
+### `tester`
+
+Creates approved test-only artifacts, executes the approved verification plan, and returns evidence without modifying production code.
+
+- Add or update test source, test scripts, fixtures, mocks/stubs/fakes, snapshots/golden files, and test-only harness configuration within approved verification scope.
+- Run mandatory verification cases and broader planned suites.
+- Report result, probable cause on failure, commands, coverage, logs/exit codes, and detailed evidence.
+- Classify failures as `production_code`, `test_artifact`, `environment_or_tooling`, `verification_plan_gap`, or `unknown` for orchestrator routing.
+- Never modify production code or choose workflow transitions.
+
+Workspace-write restricted to test-only artifacts. Model: `claude-sonnet-4-6`, effort: `max`.
 
 ### `code_reviewer`
 
@@ -72,7 +87,7 @@ Reviews the current Git changes and may create or update active review reports i
 - Review staged, unstaged, and relevant untracked changes.
 - Prioritize changed source code, tests, configuration, schemas, migrations, and build/deployment files.
 - Consult plans, handoffs, memory files, and agent notes only as scoped supporting context.
-- Perform the review directly and own the findings; may spawn a different agent type for supporting evidence, but returns fixes to `implementer` rather than applying them.
+- Perform the review directly and own the findings; may spawn a different agent type for supporting evidence, but returns fixes to the appropriate owner (`implementer` for production/runtime findings, `tester` for test-only findings) rather than applying them.
 - Check changes against project rules, review checklists, coding conventions, and detected technology patterns.
 - Identify correctness, compatibility, security, performance, concurrency, data, integration, side-effect, and documentation risks.
 - Report each issue with severity, description, file/line position, impact, evidence, and suggested fix.
@@ -98,16 +113,17 @@ The main agent owns workflow selection, runtime state, transitions, approvals, a
 
 ### Core boundaries
 
-- All code generation and code-related writes must be performed by `implementer`. The main agent may clarify, select workflows, manage state, present approvals, and summarize results, but must not generate implementation code itself.
+- Production code generation and production code-related writes must be performed by `implementer`; approved test-only writes and planned behavioral verification must be performed by `tester`. The main agent may clarify, select workflows, manage state, present approvals, and summarize results, but must not generate implementation or test code itself.
+- Every successful production mutation must pass implementer compile/build validation and then `TESTING` before code review, re-review, or completion.
 - User approval is required before any workspace mutation, even when a supplied plan is reused unchanged.
-- `code_reviewer` performs its review directly and owns the findings; it returns fixes to `implementer` rather than applying them, and never spawns another reviewer.
+- `code_reviewer` performs its review directly and owns the findings; it returns production/runtime fixes to `implementer` and test-only fixes to `tester` rather than applying them, and never spawns another reviewer.
 - Read-only subagents are constrained by their `tools` allowlist. Approval gating for writes is enforced via Claude Code `permissions` in `.claude/settings.json`, not per-agent.
 
 ## Migration notes (Codex → Claude)
 
 - `model_reasoning_effort` and `preferred_reasoning_effort` have no Claude Code equivalent and are retained only as intent labels; they have no runtime effect.
 - `approval_policy` / `sandbox_mode` were per-agent in Codex; here they map to tool allowlists plus project-level `permissions`.
-- Model mapping applied: `gpt-5.6-sol` → opus (planner), `gpt-5.5` / `gpt-5.6-terra` → sonnet (all others).
+- Model mapping applied: `gpt-5.6-sol` → opus (planner), `gpt-5.5` / `gpt-5.6-terra` → sonnet (existing non-tester agents). `tester` explicitly uses Claude Sonnet 4.6 with `max` effort.
 
 ## Agent instructions (single source)
 

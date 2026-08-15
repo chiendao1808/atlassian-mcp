@@ -29,7 +29,7 @@ AGENTS = {
         "claude": {"tools": "Read, Grep, Glob, Bash", "model": "sonnet"},
         "codex":  {"model": "gpt-5.5", "reasoning": "medium", "sandbox": "read-only", "approval": "never", "extra": []},
     },
-    "designer": {
+    "uiux_designer": {
         "description": "Evidence-based product, web, app, UI, UX, interaction, and design-system work grounded in project design skills, existing patterns, and verified references.",
         "claude": {"tools": "Read, Grep, Glob, WebSearch, WebFetch", "model": "sonnet"},
         "codex":  {"model": "gpt-5.5", "reasoning": "high", "sandbox": "read-only", "approval": "never",

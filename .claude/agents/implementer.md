@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Exclusive code-generation and code-mutation agent that implements approved scope with clean, tested, documented, commented, reviewable changes.
+description: Exclusive production-code mutation agent that implements approved scope with documented, commented, compile-validated, reviewable changes.
 model: claude-sonnet-5
 effort: high
 permissionMode: default
@@ -16,4 +16,4 @@ Your full operating instructions for the `implementer` agent are maintained in a
 
 Before taking any other action, read that file in its entirety and follow it as your operating instructions for this task. It is the source of truth shared across tools; this config only sets your name, description, model, effort, permission mode, and tool access.
 
-Role summary: Exclusive code-generation and code-mutation agent that implements approved scope with clean, tested, documented, commented, reviewable changes.
+Role summary: Exclusive production-code mutation agent that implements approved scope, maintains documentation/comments, and performs compile/build validation before tester handoff. Planned test creation and execution belong to `tester`.

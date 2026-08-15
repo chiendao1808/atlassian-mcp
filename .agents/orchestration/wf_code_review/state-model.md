@@ -1,8 +1,8 @@
 # State Model — Code Review and Remediation
 
-`name: wf_code_review` · `schema_version: 1`
+`name: wf_code_review` · `schema_version: 2`
 
-Review an existing Git change set, triage findings, optionally remediate approved issues, verify changes, and re-review.
+Review an existing Git change set, triage findings, optionally remediate approved issues, verify remediation through tester, and re-review.
 
 - **Initial state:** `REVIEW_INTAKE`
 - **Terminal states:** `COMPLETED`, `DEFERRED`, `CANCELLED`
@@ -21,7 +21,7 @@ Review an existing Git change set, triage findings, optionally remediate approve
 | `REMEDIATION_PLANNING` | `planner` | — | — |
 | `REMEDIATION_APPROVAL` | `main` | yes | — |
 | `REMEDIATION` | `implementer` | — | — |
-| `SELF_VERIFICATION` | `implementer` | — | — |
+| `TESTING` | `tester` | — | — |
 | `RE_REVIEW` | `code_reviewer` | — | — |
 | `BLOCKED` | `main` | — | — |
 | `COMPLETED` | `main` | — | yes |
@@ -78,7 +78,7 @@ Decide which findings are accepted, rejected, deferred, or require further plann
 
 - **Agent:** `main`
 - **Approval required:** no
-- **Expected outputs:** `accepted_findings`, `deferred_findings`, `rejected_findings`, `remediation_complexity`, `supplied_plan_validation`
+- **Expected outputs:** `accepted_findings`, `deferred_findings`, `rejected_findings`, `finding_ownership`, `remediation_complexity`, `supplied_plan_validation`
 - **Allowed events:** `all_findings_deferred`, `complex_remediation`, `direct_remediation`, `cancelled`, `provided_remediation_plan_ready`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
@@ -89,7 +89,7 @@ Create a remediation plan, or revise a reviewed supplied plan, for complex, cros
 
 - **Agent:** `planner`
 - **Approval required:** no
-- **Expected outputs:** `remediation_plan`, `requested_remediation_scope`, `plan_questions`
+- **Expected outputs:** `remediation_plan`, `verification_plan`, `requested_remediation_scope`, `plan_questions`
 - **Allowed events:** `plan_ready`, `clarification_needed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
@@ -100,32 +100,33 @@ Present accepted findings and the reused, revised, or new remediation scope for 
 
 - **Agent:** `main`
 - **Approval required:** yes
-- **Expected outputs:** `remediation_approval_status`, `approved_scope`
+- **Expected outputs:** `remediation_approval_status`, `approved_scope`, `approved_verification_scope`
 - **Allowed events:** `approved`, `changes_requested`, `rejected_or_deferred`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
 
 ### `REMEDIATION`
 
-Fix only accepted findings within the approved remediation scope.
+Fix only accepted production/runtime findings within the approved remediation scope.
 
 - **Agent:** `implementer`
 - **Approval required:** no
-- **Expected outputs:** `remediated_findings`, `changed_files`, `remediation_report`, `documentation_updates`, `comment_coverage`
-- **Allowed events:** `remediation_ready`, `blocked`
+- **Expected outputs:** `remediated_findings`, `changed_files`, `remediation_report`, `documentation_updates`, `comment_coverage`, `compile_validation`
+- **Allowed events:** `remediation_ready`, `compile_failed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
 
-### `SELF_VERIFICATION`
+### `TESTING`
 
-Review the remediation diff and run the narrowest appropriate compile or build validation.
+Apply approved test-only remediation when applicable, execute the approved verification plan, and return evidence without modifying production code.
 
-- **Agent:** `implementer`
+- **Agent:** `tester`
 - **Approval required:** no
-- **Expected outputs:** `diff_summary`, `verification_commands`, `verification_result`, `documentation_comment_check`
-- **Allowed events:** `verification_passed`, `verification_failed`, `blocked`
+- **Expected outputs:** `test_report`, `test_artifacts`, `test_execution_summary`, `failure_classification`, `verification_coverage`
+- **Allowed events:** `tests_passed`, `production_failure`, `test_artifact_failure`, `testing_blocked`
+- `testing_source_state` is `REMEDIATION` or `TEST_REMEDIATION`.
 - **Metadata · raw context:** `agent_outputs`
-- **Metadata · additional context:** `constraints`, `notes`
+- **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
 
 ### `RE_REVIEW`
 
@@ -145,13 +146,13 @@ Resolve missing scope, evidence, tooling, approval, or write-boundary blockers.
 - **Agent:** `main`
 - **Approval required:** no
 - **Expected outputs:** `blocker_resolution`, `resume_target`
-- **Allowed events:** `resume_intake`, `resume_review`, `resume_remediation`, `cancelled`
+- **Allowed events:** `resume_intake`, `resume_review`, `resume_remediation`, `resume_testing`, `cancelled`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
 
 ### `COMPLETED`
 
-Record the final review outcome, resolved findings, verification, and remaining risks.
+Record the final review outcome, resolved findings, verification, and remaining risks. When remediation changed production or test artifacts, completion requires the applicable compile/build evidence and a passing mandatory tester report.
 
 - **Agent:** `main`
 - **Approval required:** no
@@ -194,26 +195,31 @@ Every legal move. A transition may fire only when its guard holds; approval-gate
 | `REVIEW_TRIAGE` | `all_findings_deferred` | `no_accepted_findings` | `DEFERRED` |
 | `REVIEW_TRIAGE` | `complex_remediation` | `accepted_findings_require_plan` | `REMEDIATION_PLANNING` |
 | `REVIEW_TRIAGE` | `direct_remediation` | `accepted_findings_are_scoped_and_actionable` | `REMEDIATION_APPROVAL` |
-| `REVIEW_TRIAGE` | `provided_remediation_plan_ready` | `accepted_findings_are_covered_by_reviewed_supplied_remediation_plan` | `REMEDIATION_APPROVAL` |
-| `REMEDIATION_PLANNING` | `plan_ready` | `no_blocking_plan_questions` | `REMEDIATION_APPROVAL` |
+| `REVIEW_TRIAGE` | `provided_remediation_plan_ready` | `accepted_findings_are_covered_by_reviewed_supplied_remediation_plan_and_verification_scope_complete` | `REMEDIATION_APPROVAL` |
+| `REMEDIATION_PLANNING` | `plan_ready` | `no_blocking_plan_questions_and_verification_plan_complete` | `REMEDIATION_APPROVAL` |
 | `REMEDIATION_APPROVAL` | `changes_requested` | `user_requested_plan_or_scope_changes` | `REMEDIATION_PLANNING` |
-| `REMEDIATION_APPROVAL` | `approved` | `explicit_user_approval_and_scope_recorded` | `REMEDIATION` |
+| `REMEDIATION_APPROVAL` | `approved` | `explicit_user_approval_and_scope_recorded_and_production_or_mixed_findings_approved` | `REMEDIATION` |
+| `REMEDIATION_APPROVAL` | `approved` | `explicit_user_approval_and_scope_recorded_and_test_only_findings_approved` | `TESTING` |
 | `REMEDIATION_APPROVAL` | `rejected_or_deferred` | `user_rejected_or_deferred_remediation` | `DEFERRED` |
-| `REMEDIATION` | `remediation_ready` | `approved_remediation_applied_with_documentation_and_comment_coverage` | `SELF_VERIFICATION` |
-| `SELF_VERIFICATION` | `verification_failed` | `failure_within_approved_scope` | `REMEDIATION` |
-| `SELF_VERIFICATION` | `verification_passed` | `diff_reviewed_compile_or_build_passed_and_documentation_comment_coverage_confirmed` | `RE_REVIEW` |
-| `RE_REVIEW` | `findings_remain` | `accepted_or_new_blocking_findings_present_and_scope_valid` | `REMEDIATION` |
+| `REMEDIATION` | `compile_failed` | `compile_failure_within_approved_scope` | `REMEDIATION` |
+| `REMEDIATION` | `remediation_ready` | `approved_remediation_applied_with_documentation_and_comment_coverage_and_compile_passed` | `TESTING` |
+| `TESTING` | `tests_passed` | `mandatory_verification_complete_and_test_report_passed` | `RE_REVIEW` |
+| `TESTING` | `production_failure` | `production_behavior_failure_after_remediation` | `REMEDIATION` |
+| `TESTING` | `test_artifact_failure` | `approved_test_only_correction_scope_available` | `TESTING` |
+| `TESTING` | `testing_blocked` | `testing_blocker_recorded` | `BLOCKED` |
+| `RE_REVIEW` | `findings_remain` | `accepted_or_new_blocking_production_or_mixed_findings_present_and_scope_valid` | `REMEDIATION` |
+| `RE_REVIEW` | `findings_remain` | `accepted_or_new_blocking_test_only_findings_present_and_scope_valid` | `TESTING` |
 | `RE_REVIEW` | `review_accepted` | `accepted_findings_resolved_and_no_blocking_regressions` | `COMPLETED` |
 | `REVIEW_INTAKE` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `DIFF_REVIEW` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `EVIDENCE_VERIFICATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `REMEDIATION_PLANNING` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `REMEDIATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
-| `SELF_VERIFICATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `RE_REVIEW` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `BLOCKED` | `resume_intake` | `intake_blocker_resolved` | `REVIEW_INTAKE` |
 | `BLOCKED` | `resume_review` | `review_blocker_resolved` | `DIFF_REVIEW` |
 | `BLOCKED` | `resume_remediation` | `remediation_blocker_resolved_and_scope_approved` | `REMEDIATION` |
+| `BLOCKED` | `resume_testing` | `testing_blocker_resolved_and_verification_scope_authoritative` | `TESTING` |
 | `CLARIFICATION_REQUIRED` | `cancelled` | `user_cancelled` | `CANCELLED` |
 | `REVIEW_INTAKE` | `cancelled` | `user_cancelled` | `CANCELLED` |
 | `REVIEW_TRIAGE` | `cancelled` | `user_cancelled` | `CANCELLED` |
@@ -246,6 +252,7 @@ The orchestrator instantiates and maintains this structure per workflow run (per
     "excluded_context_files": [],
     "findings": [],
     "accepted_findings": [],
+    "finding_ownership": {},
     "deferred_findings": [],
     "rejected_findings": []
   },
@@ -256,16 +263,28 @@ The orchestrator instantiates and maintains this structure per workflow run (per
     "review_report": null,
     "evidence_report": null,
     "remediation_plan": null,
+    "verification_plan": null,
     "remediation_report": null,
     "documentation_updates": [],
     "comment_coverage": [],
+    "compile_validation": null,
+    "test_report": null,
+    "test_artifacts": [],
     "re_review_report": null
   },
   "approval": {
     "required": false,
     "status": "not_required",
     "requested_scope": [],
-    "approved_scope": []
+    "approved_scope": [],
+    "approved_verification_scope": []
+  },
+  "testing": {
+    "source_state": null,
+    "cycle": 0,
+    "max_cycles": 3,
+    "last_result": null,
+    "last_failure_classification": null
   },
   "execution": {
     "retry_count": 0,

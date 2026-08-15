@@ -1,8 +1,8 @@
 # State Model — Bug Resolution
 
-`name: wf_bug_resolving` · `schema_version: 1`
+`name: wf_bug_resolving` · `schema_version: 2`
 
-Resolve a verified defect or regression through bug clarification, impact exploration, evidence-based root-cause assessment, approved fixing, verification, and review.
+Resolve a verified defect or regression through bug clarification, impact exploration, evidence-based root-cause assessment, approved fixing, tester verification, and review.
 
 - **Initial state:** `BUG_ANALYSIS`
 - **Terminal states:** `COMPLETED`, `CANCELLED`
@@ -22,7 +22,7 @@ Resolve a verified defect or regression through bug clarification, impact explor
 | `FIX_PLANNING` | `planner` | — | — |
 | `PLAN_REVIEW` | `main` | yes | — |
 | `IMPLEMENTATION` | `implementer` | — | — |
-| `SELF_VERIFICATION` | `implementer` | — | — |
+| `TESTING` | `tester` | — | — |
 | `CODE_REVIEW` | `code_reviewer` | — | — |
 | `REMEDIATION` | `implementer` | — | — |
 | `BLOCKED` | `main` | — | — |
@@ -90,7 +90,7 @@ Create or revise a concise, implementation-ready quick-fix brief for a determini
 
 - **Agent:** `planner`
 - **Approval required:** no
-- **Expected outputs:** `quick_fix_brief`, `requested_fix_scope`, `expected_code_change`, `validation_strategy`, `risk_check`
+- **Expected outputs:** `quick_fix_brief`, `verification_plan`, `requested_fix_scope`, `expected_code_change`, `validation_strategy`, `risk_check`
 - **Allowed events:** `quick_plan_ready`, `escalate_to_full_planning`, `clarification_needed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
@@ -101,7 +101,7 @@ Create or revise the smallest safe fix plan grounded in the confirmed bug contra
 
 - **Agent:** `planner`
 - **Approval required:** no
-- **Expected outputs:** `fix_plan`, `requested_fix_scope`, `validation_strategy`, `plan_questions`
+- **Expected outputs:** `fix_plan`, `verification_plan`, `requested_fix_scope`, `validation_strategy`, `plan_questions`
 - **Allowed events:** `plan_ready`, `clarification_needed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
@@ -112,7 +112,7 @@ Present the reused, revised, or newly created fix plan, expected behavior, risks
 
 - **Agent:** `main`
 - **Approval required:** yes
-- **Expected outputs:** `plan_approval_status`, `approved_scope`
+- **Expected outputs:** `plan_approval_status`, `approved_scope`, `approved_verification_scope`
 - **Allowed events:** `approved`, `changes_requested`, `rejected`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
@@ -123,21 +123,22 @@ Implement the approved fix without expanding scope.
 
 - **Agent:** `implementer`
 - **Approval required:** no
-- **Expected outputs:** `changed_files`, `implementation_report`, `documentation_updates`, `comment_coverage`
-- **Allowed events:** `fix_ready`, `blocked`
+- **Expected outputs:** `changed_files`, `implementation_report`, `documentation_updates`, `comment_coverage`, `compile_validation`
+- **Allowed events:** `fix_ready`, `compile_failed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
 
-### `SELF_VERIFICATION`
+### `TESTING`
 
-Review the diff and run the narrowest appropriate compile, build, or focused behavior validation allowed by the approved scope.
+Create or update approved test-only artifacts, execute the approved regression/functional verification plan, and return evidence without modifying production code.
 
-- **Agent:** `implementer`
+- **Agent:** `tester`
 - **Approval required:** no
-- **Expected outputs:** `diff_summary`, `verification_commands`, `verification_result`, `documentation_comment_check`
-- **Allowed events:** `verification_passed`, `verification_failed`, `blocked`
+- **Expected outputs:** `test_report`, `test_artifacts`, `test_execution_summary`, `failure_classification`, `verification_coverage`
+- **Allowed events:** `tests_passed`, `production_failure`, `test_artifact_failure`, `testing_blocked`
+- `testing_source_state` is `IMPLEMENTATION`, `REMEDIATION`, or `TEST_REMEDIATION`.
 - **Metadata · raw context:** `agent_outputs`
-- **Metadata · additional context:** `constraints`, `notes`
+- **Metadata · additional context:** `repository_rules`, `project_skills`, `constraints`, `notes`
 
 ### `CODE_REVIEW`
 
@@ -156,8 +157,8 @@ Address accepted review findings within the approved remediation scope.
 
 - **Agent:** `implementer`
 - **Approval required:** no
-- **Expected outputs:** `remediated_findings`, `remediation_report`, `documentation_updates`, `comment_coverage`
-- **Allowed events:** `remediation_ready`, `blocked`
+- **Expected outputs:** `remediated_findings`, `remediation_report`, `documentation_updates`, `comment_coverage`, `compile_validation`
+- **Allowed events:** `remediation_ready`, `compile_failed`, `blocked`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `constraints`, `notes`
 
@@ -168,13 +169,13 @@ Resolve missing evidence, access, tooling, approval, or scope blockers while pre
 - **Agent:** `main`
 - **Approval required:** no
 - **Expected outputs:** `blocker_resolution`, `resume_target`
-- **Allowed events:** `resume_analysis`, `resume_exploration`, `resume_implementation`, `resume_complexity_assessment`, `resume_quick_planning`, `resume_full_planning`, `cancelled`
+- **Allowed events:** `resume_analysis`, `resume_exploration`, `resume_implementation`, `resume_complexity_assessment`, `resume_quick_planning`, `resume_full_planning`, `resume_testing`, `cancelled`
 - **Metadata · raw context:** `agent_outputs`
 - **Metadata · additional context:** `user_clarifications`, `constraints`, `notes`
 
 ### `COMPLETED`
 
-Record the resolved behavior, changed scope, verification, review outcome, and residual risks.
+Record the resolved behavior, changed scope, verification, review outcome, and residual risks. When production code changed, completion requires successful compile/build evidence and a passing mandatory tester report.
 
 - **Agent:** `main`
 - **Approval required:** no
@@ -207,35 +208,42 @@ Every legal move. A transition may fire only when its guard holds; approval-gate
 | `ROOT_CAUSE_ASSESSMENT` | `evidence_sufficient` | `root_cause_or_fix_condition_supported_by_evidence` | `COMPLEXITY_ASSESSMENT` |
 | `COMPLEXITY_ASSESSMENT` | `quick_fix_selected` | `all_quick_fix_eligibility_checks_pass_and_no_escalation_trigger_present` | `QUICK_FIX_PLANNING` |
 | `COMPLEXITY_ASSESSMENT` | `full_planning_selected` | `complexity_or_risk_requires_full_planning` | `FIX_PLANNING` |
-| `COMPLEXITY_ASSESSMENT` | `provided_plan_ready` | `supplied_plan_review_recommends_reuse_and_verified_scope_root_cause_risk_and_validation_are_covered` | `PLAN_REVIEW` |
+| `COMPLEXITY_ASSESSMENT` | `provided_plan_ready` | `supplied_plan_review_recommends_reuse_and_verified_scope_root_cause_risk_and_validation_are_covered_and_verification_scope_complete` | `PLAN_REVIEW` |
 | `COMPLEXITY_ASSESSMENT` | `clarification_needed` | `planning_classification_depends_on_missing_information_and_resume_state_recorded` | `CLARIFICATION_REQUIRED` |
 | `COMPLEXITY_ASSESSMENT` | `blocked` | `blocker_recorded` | `BLOCKED` |
-| `QUICK_FIX_PLANNING` | `quick_plan_ready` | `concise_scope_change_and_validation_are_complete_and_no_escalation_trigger_present` | `PLAN_REVIEW` |
+| `QUICK_FIX_PLANNING` | `quick_plan_ready` | `concise_scope_change_and_validation_are_complete_and_no_escalation_trigger_present_and_verification_plan_complete` | `PLAN_REVIEW` |
 | `QUICK_FIX_PLANNING` | `escalate_to_full_planning` | `new_cross_cutting_risk_or_scope_uncertainty_discovered` | `FIX_PLANNING` |
 | `QUICK_FIX_PLANNING` | `clarification_needed` | `blocking_quick_plan_question_present_and_resume_state_recorded` | `CLARIFICATION_REQUIRED` |
 | `QUICK_FIX_PLANNING` | `blocked` | `blocker_recorded` | `BLOCKED` |
-| `FIX_PLANNING` | `plan_ready` | `no_blocking_plan_questions` | `PLAN_REVIEW` |
+| `FIX_PLANNING` | `plan_ready` | `no_blocking_plan_questions_and_verification_plan_complete` | `PLAN_REVIEW` |
 | `PLAN_REVIEW` | `changes_requested` | `user_requested_plan_changes_and_planning_mode_is_quick_fix` | `QUICK_FIX_PLANNING` |
 | `PLAN_REVIEW` | `changes_requested` | `user_requested_plan_changes_and_planning_mode_is_full` | `FIX_PLANNING` |
-| `PLAN_REVIEW` | `approved` | `explicit_user_plan_approval_and_scope_recorded` | `IMPLEMENTATION` |
+| `PLAN_REVIEW` | `approved` | `explicit_user_plan_approval_and_production_and_verification_scope_recorded` | `IMPLEMENTATION` |
 | `PLAN_REVIEW` | `rejected` | `user_rejected_plan` | `CANCELLED` |
-| `IMPLEMENTATION` | `fix_ready` | `approved_fix_applied_with_documentation_and_comment_coverage` | `SELF_VERIFICATION` |
-| `SELF_VERIFICATION` | `verification_failed` | `failure_within_approved_scope` | `IMPLEMENTATION` |
-| `SELF_VERIFICATION` | `verification_passed` | `diff_reviewed_validation_passed_and_documentation_comment_coverage_confirmed` | `CODE_REVIEW` |
-| `CODE_REVIEW` | `findings_found` | `accepted_actionable_findings_present` | `REMEDIATION` |
+| `IMPLEMENTATION` | `compile_failed` | `compile_failure_within_approved_scope` | `IMPLEMENTATION` |
+| `IMPLEMENTATION` | `fix_ready` | `approved_fix_applied_with_documentation_and_comment_coverage_and_compile_passed` | `TESTING` |
+| `TESTING` | `tests_passed` | `mandatory_verification_complete_and_test_report_passed` | `CODE_REVIEW` |
+| `TESTING` | `production_failure` | `testing_source_state_is_implementation` | `IMPLEMENTATION` |
+| `TESTING` | `production_failure` | `testing_source_state_is_remediation` | `REMEDIATION` |
+| `TESTING` | `production_failure` | `testing_source_state_is_test_remediation` | `REMEDIATION` |
+| `TESTING` | `test_artifact_failure` | `approved_test_only_correction_scope_available` | `TESTING` |
+| `TESTING` | `testing_blocked` | `testing_blocker_recorded` | `BLOCKED` |
+| `CODE_REVIEW` | `findings_found` | `accepted_actionable_production_or_mixed_findings_present` | `REMEDIATION` |
+| `CODE_REVIEW` | `findings_found` | `accepted_actionable_test_only_findings_present` | `TESTING` |
 | `CODE_REVIEW` | `review_accepted` | `expected_behavior_restored_and_no_blocking_findings` | `COMPLETED` |
-| `REMEDIATION` | `remediation_ready` | `accepted_findings_addressed_with_documentation_and_comment_coverage` | `SELF_VERIFICATION` |
+| `REMEDIATION` | `compile_failed` | `compile_failure_within_approved_scope` | `REMEDIATION` |
+| `REMEDIATION` | `remediation_ready` | `accepted_findings_addressed_with_documentation_and_comment_coverage_and_compile_passed` | `TESTING` |
 | `BUG_ANALYSIS` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `IMPACT_EXPLORATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `ROOT_CAUSE_ASSESSMENT` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `FIX_PLANNING` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `IMPLEMENTATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
-| `SELF_VERIFICATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `CODE_REVIEW` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `REMEDIATION` | `blocked` | `blocker_recorded` | `BLOCKED` |
 | `BLOCKED` | `resume_analysis` | `analysis_blocker_resolved` | `BUG_ANALYSIS` |
 | `BLOCKED` | `resume_exploration` | `exploration_blocker_resolved` | `IMPACT_EXPLORATION` |
 | `BLOCKED` | `resume_implementation` | `implementation_blocker_resolved_and_scope_approved` | `IMPLEMENTATION` |
+| `BLOCKED` | `resume_testing` | `testing_blocker_resolved_and_verification_scope_authoritative` | `TESTING` |
 | `CLARIFICATION_REQUIRED` | `cancelled` | `user_cancelled` | `CANCELLED` |
 | `BUG_ANALYSIS` | `cancelled` | `user_cancelled` | `CANCELLED` |
 | `FIX_PLANNING` | `clarification_needed` | `blocking_plan_questions_present_and_resume_state_recorded` | `CLARIFICATION_REQUIRED` |
@@ -284,16 +292,28 @@ The orchestrator instantiates and maintains this structure per workflow run (per
     "root_cause_report": null,
     "quick_fix_brief": null,
     "fix_plan": null,
+    "verification_plan": null,
     "implementation_report": null,
     "documentation_updates": [],
     "comment_coverage": [],
+    "compile_validation": null,
+    "test_report": null,
+    "test_artifacts": [],
     "review_report": null
   },
   "approval": {
     "required": false,
     "status": "not_required",
     "requested_scope": [],
-    "approved_scope": []
+    "approved_scope": [],
+    "approved_verification_scope": []
+  },
+  "testing": {
+    "source_state": null,
+    "cycle": 0,
+    "max_cycles": 3,
+    "last_result": null,
+    "last_failure_classification": null
   },
   "execution": {
     "retry_count": 0,

@@ -5,7 +5,7 @@
 
 ## Purpose
 
-Use this workflow when reviewing an existing Git change set is the primary objective. It supports review-only completion, issue triage, approved remediation, self-verification, and re-review.
+Use this workflow when reviewing an existing Git change set is the primary objective. It supports review-only completion, issue triage, approved remediation, tester verification, and re-review.
 
 This workflow is also suitable for pre-merge checks, independent post-implementation review, and remediation of findings produced by a previous review cycle.
 
@@ -14,8 +14,9 @@ This workflow is also suitable for pre-merge checks, independent post-implementa
 - `req_analyzer`: clarifies the review target when scope, requirements, or source links are incomplete.
 - `code_reviewer`: inspects the change set directly in its assigned thread, may spawn a different-type helper (e.g. `explorer`) for evidence but never another reviewer, prioritizes changed code and runtime-affecting artifacts, and uses plan or memory files only as scoped supporting context.
 - `explorer`: verifies uncertain impact or side-effect findings when additional codebase evidence is required.
-- `planner`: creates a remediation plan only when needed, or revises a reviewed supplied plan for complex findings.
-- `implementer`: exclusively applies approved remediation, adds required documentation/comments, and performs self-verification.
+- `planner`: creates a remediation plan only when needed, or revises a reviewed supplied plan for complex findings; code/test-changing remediation plans include a tester-consumable `verification_plan`.
+- `implementer`: exclusively applies approved production remediation, adds required documentation/comments, and performs compile/build validation.
+- `tester`: applies approved test-only remediation where applicable, creates approved test artifacts, executes the verification plan, and returns result/cause/evidence.
 
 ## Review Scope Priority
 
@@ -109,6 +110,8 @@ This workflow is also suitable for pre-merge checks, independent post-implementa
 +---------+                   +----------------------+
 ```
 
+Direct remediation keeps the existing `direct_remediation` event; the guard uses triaged finding ownership to determine the approved mutation scope:
+
 ```text
 +---------------+
 | REVIEW_TRIAGE |
@@ -123,23 +126,36 @@ This workflow is also suitable for pre-merge checks, independent post-implementa
 
 ### Remediation approval
 
+The existing `approved` event is reused; its guard determines the next write-owning agent.
+
 ```text
-+----------------------+
-| REMEDIATION_APPROVAL |
-+----------+-----------+
-           |
-      +----+--------------------+
-      |                         |
-      | approved                | rejected_or_deferred
-      v                         v
-+-------------+           +----------+
-| REMEDIATION |           | DEFERRED |
-+-------------+           +----+-----+
-                                |
-                                v
-                            +---+---+
-                            |  END  |
-                            +-------+
+                         +----------------------+
+                         | REMEDIATION_APPROVAL |
+                         +----------+-----------+
+                                    |
+                 +------------------+------------------+
+                 |                                     |
+                 | approved                            | approved
+                 | production/mixed                    | test-only
+                 v                                     v
+           +-------------+                       +---------+
+           | REMEDIATION |                       | TESTING |
+           +-------------+                       +---------+
+
+                         +----------------------+
+                         | REMEDIATION_APPROVAL |
+                         +----------+-----------+
+                                    |
+                                    | rejected_or_deferred
+                                    v
+                               +----------+
+                               | DEFERRED |
+                               +----+-----+
+                                    |
+                                    v
+                                +---+---+
+                                |  END  |
+                                +-------+
 ```
 
 ```text
@@ -154,46 +170,70 @@ This workflow is also suitable for pre-merge checks, independent post-implementa
 +----------------------+
 ```
 
-### Remediation and self-verification
+### Remediation and testing
 
 ```text
 +-------------+<---------------------------+
 | REMEDIATION |                            |
 +------+------+                            |
        |                                   |
-       | remediation_ready                 | verification_failed
+       | remediation_ready                 | production_failure
+       | compile_validation=passed         |
        v                                   |
-+-------------------+----------------------+
-| SELF_VERIFICATION |
-+---------+---------+
-          |
-          | verification_passed
-          v
++---------+--------------------------------+
+| TESTING |
++----+----+
+     |
+     | tests_passed
+     v
 +-----------+
 | RE_REVIEW |
 +-----------+
 ```
 
+Compile/build failure remains in `REMEDIATION`; it does not advance to `TESTING`. Test-only remediation enters `TESTING` directly after approval with `source=TEST_REMEDIATION` and remains tester-owned.
+
+Tester-owned and blocked failures route separately:
+
+```text
++---------+<----------------------+
+| TESTING |                       |
++----+----+                       |
+     |                            | test_artifact_failure
+     | testing_blocked            |
+     v                            |
++---------+                       |
+| BLOCKED |-----------------------+
++---------+  resume_testing after blocker resolution
+```
+
+`testing_blocked` covers environment/tooling failures, verification-plan gaps, and unknown failures that require evidence before selecting a mutation owner.
+
 ### Re-review outcome
+
+The existing `findings_remain` event is reused; the guard routes by ownership.
 
 ```text
 +-----------+
 | RE_REVIEW |
 +-----+-----+
       |
- +----+-------------------+
- |                        |
- | review_accepted        | findings_remain
- v                        v
-+-----------+       +-------------+
-| COMPLETED |       | REMEDIATION |
-+-----+-----+       +-------------+
+ +----+-------------------------------+------------------------------+
+ |                                    |                              |
+ | review_accepted                    | findings_remain              | findings_remain
+ |                                    | production/mixed             | test-only
+ v                                    v                              v
++-----------+                   +-------------+                  +---------+
+| COMPLETED |                   | REMEDIATION |                  | TESTING |
++-----+-----+                   +-------------+                  +---------+
       |
       v
 +-----+
 | END |
 +-----+
 ```
+
+Production/mixed findings return through `REMEDIATION -> TESTING -> RE_REVIEW`; test-only findings return through `TESTING -> RE_REVIEW`.
 
 ### Clarification routing
 
@@ -246,6 +286,20 @@ This workflow is also suitable for pre-merge checks, independent post-implementa
 +---------------+  +-------------+  +-------------+
 ```
 
+Testing-specific recovery adds:
+
+```text
++---------+
+| BLOCKED |
++----+----+
+     |
+     | resume_testing
+     v
++---------+
+| TESTING |
++---------+
+```
+
 ### Blocked-state cancellation
 
 ```text
@@ -286,17 +340,17 @@ This workflow is also suitable for pre-merge checks, independent post-implementa
 +----------------------+
 ```
 
-Direct reuse is allowed only when the reviewed supplied plan covers all accepted findings and current diff evidence. Otherwise `planner` revises the existing plan.
+Direct reuse is allowed only when the reviewed supplied plan covers all accepted findings and current diff evidence. When remediation mutates production or test artifacts, the plan must also provide sufficient verification scope for `tester`. Otherwise `planner` revises the existing plan.
 
 ## Key Gates
 
 - Review scope must be explicit: workspace diff, staged diff, commit range, branch comparison, or supplied files. Within that scope, changed code and runtime-affecting artifacts take priority over plan and memory artifacts.
 - Findings must contain evidence, severity, position, impact or side effect, and a fix suggestion when possible.
 - Uncertain findings require evidence verification before remediation.
-- A reviewed supplied remediation plan must be reused when it covers the accepted findings; new planning is only for targeted revision or justified replacement.
+- A reviewed supplied remediation plan must be reused when it covers the accepted findings; new planning is only for targeted revision or justified replacement. Mutating remediation must include an executable verification scope for `tester`.
 - Remediation requires explicit user approval and a recorded scope.
-- All code generation and code-related writes must be performed by `implementer`, never by the main agent.
-- Every created or modified logic unit must have documentation and intent-comment coverage.
-- Remediated changes must pass code, build, documentation/comment self-verification, and re-review.
+- Production code-related remediation must be performed by `implementer`; approved test-only remediation and planned behavioral verification are owned by `tester`, never by the main agent.
+- Every created or modified production logic unit must have documentation and intent-comment coverage.
+- Production remediation must pass compile/build validation before tester handoff; all approved remediation must pass mandatory `TESTING` before re-review/completion.
 
 The Markdown state model (`state-model.md`) is authoritative for state definitions, metadata expectations, transition events, and guards.

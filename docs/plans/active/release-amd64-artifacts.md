@@ -15,7 +15,10 @@ no-Debian tag/draft workflow test. This is not the production release contract:
 Debian generation, Debian SBOM expectations, and `.deb` checks must be restored
 before an actual release. GitHub-hosted artifact validation, protected release
 approval, and external same-tag compatibility gates have not run after this
-fix.
+fix. On 2026-08-15, the user approved a follow-up scope extension to switch the
+PowerShell and Bash installers from source-build defaults to verified published
+release binary downloads, while retaining explicit local/offline `-Binary` /
+`--binary` overrides.
 
 ## Outcome
 
@@ -222,9 +225,11 @@ responses must not be placed in the workflow, release assets, or public logs.
   jobs remain read-only and never run with `pull_request_target`.
 - The tag must match `v<semantic-version>`. `v` is removed for binary/package
   version output; invalid tags fail before GoReleaser runs.
-- Existing source-build installation remains compatible. README release
-  examples download an asset, verify it, then either install it directly or
-  pass it to the existing `--binary` / `-Binary` option.
+- Installer defaults now resolve the latest stable GitHub release or a pinned
+  release tag, download the matching platform executable and checksum manifest,
+  verify SHA-256, then install atomically. Explicit local/offline `--binary` /
+  `-Binary` inputs remain supported; source clone/build installer flags are
+  removed from the public contract.
 
 ## Progress
 
@@ -283,7 +288,36 @@ responses must not be placed in the workflow, release assets, or public logs.
 - [x] Update `README.md` with the amd64 support boundary, exact asset-selection
   rules, SHA-256 verification commands for Bash and PowerShell, `.deb` and raw
   binary installation, Windows execution, `--version` checks, SBOM purpose,
-  and the existing source-build fallback.
+  and the explicit local/offline binary fallback.
+- [x] 2026-08-15 follow-up: implement the user-approved installer contract
+  change so `scripts/install-from-remote.sh` and
+  `scripts/install-from-remote.ps1` default to verified release binary download,
+  support `--release-tag` / `-ReleaseTag`, keep `--binary` / `-Binary`, and no
+  longer expose source clone/build flags.
+- [x] 2026-08-15 follow-up: update installer tests to fake GitHub latest-release
+  API, binary/checksum downloads, checksum mismatch, pinned releases, and
+  unsupported Bash platform detection while retaining core config/idempotence
+  coverage through explicit binary installs.
+- [x] 2026-08-15 follow-up: rewrite `README.md` as binary-first installation
+  guidance with a versioned `v1.0.4` changelog entry, and add
+  `docs/tools/catalog.md` as the concise table reference for registered Jira,
+  Confluence, and Bitbucket tools.
+- [x] 2026-08-15 follow-up: record spawned implementer config used for this
+  approved implementation handoff: `.codex/agents/implementer.toml`,
+  model `gpt-5.5`, reasoning `high`, access `workspace-write`, approval
+  policy `on-request`.
+- [x] 2026-08-15 review remediation: fix README bootstrap/changelog accuracy
+  by using `main` only as the current moving unreleased installer bootstrap
+  ref, keeping `v1.0.4` only as the release-binary pin/published asset entry,
+  and moving binary-first installer/docs changes under `Unreleased`.
+- [x] 2026-08-15 review remediation: restore applicable installer regression
+  coverage through local `--binary` / `-Binary` installs for service URL
+  credential rejection, module and credential validation, stale Confluence env
+  clearing, agent config escaping, Claude CLI scope/missing binary behavior,
+  config rollback/idempotence/ACL behavior, piped input handling, and dry-run.
+- [x] 2026-08-15 review remediation: add PowerShell `Invoke-WebRequest`
+  `-TimeoutSec 120` to the latest-release API, binary asset, and checksum
+  downloads, matching the Bash `--max-time 120` policy.
 - [x] Review the workflow's effective permissions, action/tool pins, asset
   retention, absence of secret output, and lack of unrequested publishers.
 - [x] CR-001: serialize same-ref release workflow runs and re-download draft
@@ -546,6 +580,40 @@ Repository-required checks:
 
 Local validation on Windows:
 
+- 2026-08-15 binary-installer follow-up: `codegraph sync .` passed before
+  implementation inspection; the index was already up to date.
+- 2026-08-15 binary-installer follow-up: test-first red proof observed:
+  `C:\Program Files\Git\bin\bash.exe tests/install-from-remote_test.sh` first
+  failed because the previous Bash installer still required `--source-repo-url`;
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  tests\install-from-remote.Tests.ps1` was corrected to fail through the real
+  installer path before implementation, then the new release behavior was
+  implemented.
+- 2026-08-15 binary-installer follow-up: focused installer tests were updated
+  to fake GitHub release metadata and downloads, verify release checksums,
+  prove pinned tags, prove checksum mismatch preserves an existing destination,
+  prove Bash unsupported-platform rejection, and prove `git clone` / `go build`
+  are not called on the default release install path.
+- 2026-08-15 binary-installer follow-up: a generated
+  `Microsoft/Windows/PowerShell/ModuleAnalysisCache` directory appeared at the
+  repository root during PowerShell test execution; it was inspected as a
+  generated PowerShell cache artifact and removed from
+  `F:\CodeSource\atlassian-mcp\Microsoft`.
+- 2026-08-15 review remediation validation passed:
+  `C:\Program Files\Git\bin\bash.exe tests/install-from-remote_test.sh`
+  exited 0 and printed `PASS install-from-remote_test.sh` after the expanded
+  release plus restored regression suite.
+- 2026-08-15 review remediation validation passed:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  tests\install-from-remote.Tests.ps1` exited 0 and printed
+  `PASS install-from-remote.Tests.ps1` after the expanded release plus restored
+  regression suite.
+- 2026-08-15 review remediation validation passed: `git diff --check` exited
+  0 with only the existing Windows checkout warnings that LF will be replaced
+  by CRLF next time Git touches the edited files.
+- 2026-08-15 review remediation cleanup: PowerShell tests regenerated
+  `F:\CodeSource\atlassian-mcp\Microsoft\Windows\PowerShell\ModuleAnalysisCache`;
+  the exact generated cache tree was removed again after validation.
 - `codegraph sync .` passed; the index was already up to date before
   implementation inspection.
 - `goreleaser check` passed with local GoReleaser `2.17.1`.

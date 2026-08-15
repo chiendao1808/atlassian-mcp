@@ -5,7 +5,7 @@ MARKER="atlassian-mcp managed block"
 BACKUP_PATHS=()
 BACKUP_FILES=()
 BACKUP_EXISTS=()
-install_succeeded="no"
+download_dir=""
 
 # Prints a fatal user-facing validation or execution error and terminates the installer.
 die() {
@@ -18,17 +18,15 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/install-from-remote.sh [options]
 
-Installs atlassian-mcp from a provider-neutral Git remote or a prebuilt binary,
-then writes non-secret wrapper and agent configuration for Codex and/or Claude.
+Installs atlassian-mcp from the published GitHub release binary or a prebuilt
+local binary, then writes non-secret wrapper and agent configuration for Codex
+and/or Claude.
 
 Required source:
-  --source-repo-url URL                required unless --binary is used
-  --binary FILE_PATH                   install prebuilt binary instead of cloning/building
+  --binary FILE_PATH                   install a local binary instead of downloading a release
 
 Common options:
-  --source-ref REF                     default: main
-  --source-clone-depth N               default: 1
-  --keep-source
+  --release-tag TAG                    exact release tag to install; default: latest stable release
   --install-dir DIRECTORY              default: $HOME/.local/bin
   --agents claude|codex|both|none      interactive when omitted unless --non-interactive
   --scope local|project|user           default: user
@@ -51,7 +49,6 @@ Common options:
   --bitbucket-token-env VARIABLE_NAME  default: BITBUCKET_BEARER_TOKEN
   --bitbucket-ca-file FILE_PATH
   --atlassian-tls-verify true|false    default: false
-  --skip-tests
   --dry-run
   --replace                            replace managed Claude project config
   --non-interactive
@@ -88,14 +85,6 @@ require_url() {
   authority="${value#*://}"
   authority="${authority%%/*}"
   [[ "$authority" != *@* ]] || die "$name must not include embedded credentials"
-}
-
-# Rejects credential-bearing source URLs before any Git command can log or persist them.
-reject_embedded_credentials() {
-  local url="$1"
-  case "$url" in
-    http://*@*|https://*@*) die "--source-repo-url must not include embedded credentials" ;;
-  esac
 }
 
 # Ensures a token/password environment indirection name can be embedded safely and looked up.
@@ -387,48 +376,7 @@ configure_agents() {
   esac
 }
 
-# Clones the provider-neutral source remote and checks out the requested branch, tag, or commit.
-clone_source() {
-  source_dir="$(mktemp -d "${TMPDIR:-/tmp}/atlassian-mcp-src-XXXXXX")"
-  git clone --depth "$source_clone_depth" "$source_repo_url" "$source_dir"
-  (
-    cd "$source_dir"
-    git fetch --depth "$source_clone_depth" origin "$source_ref" >/dev/null 2>&1 || true
-    git checkout "$source_ref"
-    git rev-parse --verify HEAD >/dev/null
-  )
-}
-
-# Runs repository tests unless skipped, then builds cmd/atlassian-mcp into a temporary binary.
-build_binary() {
-  local out
-  out="$(mktemp)"
-  if [[ "$skip_tests" != "yes" ]]; then
-    (cd "$source_dir" && go test ./...)
-  fi
-  (cd "$source_dir" && go build -o "$out" ./cmd/atlassian-mcp)
-  built_binary="$out"
-}
-
-# Removes cloned source after install, unless --keep-source was requested for debugging.
-cleanup_source() {
-  if [[ -n "${source_dir:-}" && "$keep_source" != "yes" ]]; then
-    local old_source_dir="$source_dir"
-    rm -rf "$old_source_dir"
-    if [[ -e "$old_source_dir" ]]; then
-      echo "warning: could not clean cloned source $old_source_dir" >&2
-    else
-      echo "cleaned cloned source $old_source_dir"
-      source_dir=""
-    fi
-  fi
-  return 0
-}
-
-source_repo_url=""
-source_ref="main"
-source_clone_depth="1"
-keep_source="no"
+release_tag=""
 binary=""
 install_dir="${HOME:-}/.local/bin"
 agents=""
@@ -451,17 +399,13 @@ bitbucket_user_slug=""
 bitbucket_token_env="BITBUCKET_BEARER_TOKEN"
 bitbucket_ca_file=""
 atlassian_tls_verify="false"
-skip_tests="no"
 dry_run="no"
 replace="no"
 non_interactive="no"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --source-repo-url) source_repo_url="${2:-}"; shift 2 ;;
-    --source-ref) source_ref="${2:-}"; shift 2 ;;
-    --source-clone-depth) source_clone_depth="${2:-}"; shift 2 ;;
-    --keep-source) keep_source="yes"; shift ;;
+    --release-tag) release_tag="${2:-}"; shift 2 ;;
     --binary) binary="${2:-}"; shift 2 ;;
     --install-dir) install_dir="${2:-}"; shift 2 ;;
     --agents) agents="${2:-}"; shift 2 ;;
@@ -484,7 +428,6 @@ while [[ $# -gt 0 ]]; do
     --bitbucket-token-env) bitbucket_token_env="${2:-}"; shift 2 ;;
     --bitbucket-ca-file) bitbucket_ca_file="${2:-}"; shift 2 ;;
     --atlassian-tls-verify) atlassian_tls_verify="${2:-}"; shift 2 ;;
-    --skip-tests) skip_tests="yes"; shift ;;
     --dry-run) dry_run="yes"; shift ;;
     --replace) replace="yes"; shift ;;
     --non-interactive) non_interactive="yes"; shift ;;
@@ -493,12 +436,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-trap '[[ "$install_succeeded" == "yes" ]] || cleanup_source' EXIT
+cleanup_download() {
+  if [[ -n "$download_dir" ]]; then
+    rm -rf "$download_dir"
+    download_dir=""
+  fi
+}
 
-[[ -n "$binary" || -n "$source_repo_url" ]] || die "--source-repo-url is required unless --binary is used"
-[[ -n "$binary" || ! "$source_repo_url" =~ ^https?:// ]] || reject_embedded_credentials "$source_repo_url"
-[[ -n "$binary" || "$source_repo_url" == https://* || "$source_repo_url" == http://* || "$source_repo_url" == git@* || "$source_repo_url" == ssh://* ]] || die "--source-repo-url must be HTTPS or SSH"
+trap 'cleanup_download' EXIT
+
 [[ -z "$binary" || -f "$binary" ]] || die "--binary must point to a readable file"
+[[ -z "$release_tag" || "$release_tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-+][A-Za-z0-9._-]+)?$ ]] || die "--release-tag must look like v1.2.3"
 if [[ -z "$agents" ]]; then
   [[ "$non_interactive" != "yes" ]] || die "--agents is required with --non-interactive"
   prompt_agents
@@ -546,11 +494,54 @@ if [[ "$dry_run" == "yes" ]]; then
   exit 0
 fi
 
+release_platform() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  if [[ "$os" == "Linux" && ( "$arch" == "x86_64" || "$arch" == "amd64" ) ]]; then
+    printf 'linux_amd64\n'
+    return
+  fi
+  die "unsupported platform: $os/$arch (supported: Linux amd64)"
+}
+
+resolve_release_tag() {
+  if [[ -n "$release_tag" ]]; then
+    printf '%s\n' "$release_tag"
+    return
+  fi
+  local json tag
+  json="$(curl -fsSL --connect-timeout 15 --max-time 120 "https://api.github.com/repos/chiendao1808/atlassian-mcp/releases/latest")"
+  tag="$(printf '%s\n' "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$tag" ]] || die "could not resolve latest GitHub release tag"
+  printf '%s\n' "$tag"
+}
+
+download_release_binary() {
+  local platform tag version asset checksum_asset base_url expected actual line
+  platform="$(release_platform)"
+  tag="$(resolve_release_tag)"
+  version="${tag#v}"
+  asset="atlassian-mcp_${version}_${platform}"
+  checksum_asset="atlassian-mcp_${version}_checksums.txt"
+  base_url="https://github.com/chiendao1808/atlassian-mcp/releases/download/$tag"
+  download_dir="$(mktemp -d "${TMPDIR:-/tmp}/atlassian-mcp-release-XXXXXX")"
+
+  curl -fsSL --connect-timeout 15 --max-time 120 -o "$download_dir/$asset" "$base_url/$asset"
+  curl -fsSL --connect-timeout 15 --max-time 120 -o "$download_dir/$checksum_asset" "$base_url/$checksum_asset"
+  line="$(awk -v name="$asset" '$2 == name || $2 == "*" name { print; exit }' "$download_dir/$checksum_asset")"
+  [[ -n "$line" ]] || die "checksum entry not found for $asset"
+  expected="${line%%[[:space:]]*}"
+  actual="$(sha256sum "$download_dir/$asset" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] || die "checksum mismatch for $asset"
+  chmod +x "$download_dir/$asset"
+  built_binary="$download_dir/$asset"
+}
+
 if [[ -n "$binary" ]]; then
   built_binary="$binary"
 else
-  clone_source
-  build_binary
+  download_release_binary
 fi
 
 installed_binary="$install_dir/atlassian-mcp"
@@ -567,5 +558,4 @@ if [[ "$agents" != "none" ]]; then
 fi
 
 echo "installed atlassian-mcp to $installed_binary"
-install_succeeded="yes"
-cleanup_source
+cleanup_download

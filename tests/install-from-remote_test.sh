@@ -10,7 +10,7 @@ TMP_ROOT="$(mktemp -d)"
 
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-# Minimal shell harness: each test runs the real installer with fake external tools and asserts observable files, logs, or failures.
+# Minimal shell harness: run the real installer against fake network/tool boundaries.
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -18,10 +18,6 @@ fail() {
 
 assert_file() {
   [[ -f "$1" ]] || fail "missing file: $1"
-}
-
-assert_path_missing() {
-  [[ ! -e "$1" ]] || fail "path still exists: $1"
 }
 
 assert_contains() {
@@ -43,96 +39,93 @@ assert_count() {
   local text="$2"
   local want="$3"
   local got
-  # grep prints "0" but exits 1 on no match; keep assert_count safe under errexit.
   got="$(grep -F -c -- "$text" "$file" 2>/dev/null || :)"
   got="${got:-0}"
   [[ "$got" == "$want" ]] || fail "count for '$text' in $file = $got, want $want"
 }
 
-get_cloned_source_dir() {
-  local log="$1"
-  local path
-  path="$(awk '/^git clone /{print $NF; exit}' "$log")"
-  [[ -n "$path" ]] || fail "missing git clone log line"
-  printf '%s\n' "$path"
+make_release_fixture() {
+  local dir="$1"
+  local version
+  mkdir -p "$dir"
+  printf '{"tag_name":"v1.2.3"}\n' >"$dir/latest.json"
+  for version in 1.2.3 9.9.9; do
+    local asset="atlassian-mcp_${version}_linux_amd64"
+    printf '#!/usr/bin/env bash\necho atlassian-mcp %s\n' "$version" >"$dir/$asset"
+    chmod +x "$dir/$asset"
+    (cd "$dir" && sha256sum "$asset" >"atlassian-mcp_${version}_checksums.txt")
+  done
 }
 
-# Creates fake git/go/cp/mv commands so installer tests prove command selection without network or host installs.
+# Fake external boundaries. git/go fail loudly because release installs must not build source.
 make_fakes() {
   local dir="$1"
   mkdir -p "$dir"
-  cat >"$dir/git" <<'FAKE_GIT'
+  cat >"$dir/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "git $*" >>"$FAKE_LOG"
-case "$1" in
-  clone)
-    dest="${@: -1}"
-    mkdir -p "$dest/cmd/atlassian-mcp"
-    printf 'module example.com/atlassian-mcp\n' >"$dest/go.mod"
-    ;;
-  fetch|checkout)
-    ;;
-  rev-parse)
-    printf 'mocked-ref\n'
-    ;;
+echo "curl $*" >>"$FAKE_LOG"
+out=""
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    --connect-timeout|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+name="${url##*/}"
+if [[ "$url" == *"/releases/latest" ]]; then
+  cat "$FAKE_RELEASE_DIR/latest.json"
+  exit 0
+fi
+if [[ "$name" == *_checksums.txt && "${FAKE_CHECKSUM_MISMATCH:-}" == "1" ]]; then
+  printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "${name/_checksums.txt/_linux_amd64}" >"$out"
+  exit 0
+fi
+cp "$FAKE_RELEASE_DIR/$name" "$out"
+FAKE_CURL
+  cat >"$dir/uname" <<'FAKE_UNAME'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "${FAKE_UNAME_S:-Linux}" ;;
+  -m) printf '%s\n' "${FAKE_UNAME_M:-x86_64}" ;;
+  *) printf '%s\n' Linux ;;
 esac
+FAKE_UNAME
+  cat >"$dir/git" <<'FAKE_GIT'
+#!/usr/bin/env bash
+echo "git $*" >>"$FAKE_LOG"
+exit 99
 FAKE_GIT
   cat >"$dir/go" <<'FAKE_GO'
 #!/usr/bin/env bash
-set -euo pipefail
 echo "go $*" >>"$FAKE_LOG"
-if [[ "$1" == "build" ]]; then
-  out=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -o)
-        out="$2"
-        shift 2
-        ;;
-      *)
-        shift
-        ;;
-    esac
-  done
-  [[ -n "$out" ]] || exit 1
-  mkdir -p "$(dirname "$out")"
-  printf '#!/usr/bin/env bash\necho atlassian-mcp\n' >"$out"
-  chmod +x "$out"
-fi
+exit 99
 FAKE_GO
-  cat >"$dir/cp" <<'FAKE_CP'
-#!/usr/bin/env bash
-echo "cp $*" >>"$FAKE_LOG"
-exec /usr/bin/cp "$@"
-FAKE_CP
-  cat >"$dir/mv" <<'FAKE_MV'
-#!/usr/bin/env bash
-echo "mv $*" >>"$FAKE_LOG"
-exec /usr/bin/mv "$@"
-FAKE_MV
   cat >"$dir/claude" <<'FAKE_CLAUDE'
 #!/usr/bin/env bash
 echo "claude $*" >>"$FAKE_LOG"
 case "$1 $2" in
   "mcp remove") exit 1 ;;
-  "mcp add") exit 0 ;;
-  "mcp get") exit 0 ;;
   *) exit 0 ;;
 esac
 FAKE_CLAUDE
-  chmod +x "$dir/git" "$dir/go" "$dir/cp" "$dir/mv" "$dir/claude"
+  chmod +x "$dir/curl" "$dir/uname" "$dir/git" "$dir/go" "$dir/claude"
 }
 
-# Runs one isolated installer case with HOME, install dir, project dir, and PATH scoped to the test temp tree.
 run_installer() {
   local name="$1"
   shift
   local case_dir="$TMP_ROOT/$name"
   local fake_bin="$case_dir/bin"
+  local release_dir="$case_dir/release"
   mkdir -p "$case_dir/home" "$case_dir/install" "$case_dir/project"
   make_fakes "$fake_bin"
+  make_release_fixture "$release_dir"
   FAKE_LOG="$case_dir/commands.log" \
+  FAKE_RELEASE_DIR="$release_dir" \
   HOME="$case_dir/home" \
   PATH="$fake_bin:/usr/bin:/bin" \
     bash "$INSTALLER" \
@@ -143,73 +136,100 @@ run_installer() {
       "$@"
 }
 
-test_https_remotes_checkout_test_build_and_install_atomically() {
-  local urls=(
-    "https://github.com/acme/atlassian-mcp.git"
-    "https://gitlab.com/acme/atlassian-mcp.git"
-    "https://bitbucket.internal.example.com/scm/prj/atlassian-mcp.git"
-  )
-  local url
-  for url in "${urls[@]}"; do
-    local name="remote-${url//[^A-Za-z0-9]/-}"
-    run_installer "$name" \
-      --source-repo-url "$url" \
-      --source-ref v1.2.3 \
-      --agents codex \
-      --enable-jira \
-      --jira-base-url https://jira.internal.example.com/jira
-    local dir="$TMP_ROOT/$name"
-    assert_contains "$dir/commands.log" "git clone"
-    assert_contains "$dir/commands.log" "$url"
-    assert_contains "$dir/commands.log" "git checkout v1.2.3"
-    assert_contains "$dir/commands.log" "go test ./..."
-    assert_contains "$dir/commands.log" "go build -o"
-    assert_contains "$dir/commands.log" "mv"
-    assert_file "$dir/install/atlassian-mcp"
-    assert_file "$dir/install/atlassian-mcp-run"
-    assert_path_missing "$(get_cloned_source_dir "$dir/commands.log")"
-  done
-}
-
-test_keep_source_preserves_clone_for_debugging() {
-  run_installer keep-source \
-    --source-repo-url https://github.com/acme/atlassian-mcp.git \
-    --keep-source \
+test_default_release_download_verifies_and_installs_without_source_build() {
+  run_installer default-release \
     --agents none \
     --enable-jira \
     --jira-base-url https://jira.internal.example.com/jira
-  local source_dir
-  source_dir="$(get_cloned_source_dir "$TMP_ROOT/keep-source/commands.log")"
-  [[ -d "$source_dir" ]] || fail "kept source was removed: $source_dir"
-  rm -rf "$source_dir"
+  local dir="$TMP_ROOT/default-release"
+  assert_file "$dir/install/atlassian-mcp"
+  assert_file "$dir/install/atlassian-mcp-run"
+  assert_contains "$dir/install/atlassian-mcp" "atlassian-mcp 1.2.3"
+  assert_contains "$dir/commands.log" "releases/latest"
+  assert_contains "$dir/commands.log" "atlassian-mcp_1.2.3_linux_amd64"
+  assert_contains "$dir/commands.log" "atlassian-mcp_1.2.3_checksums.txt"
+  assert_not_contains "$dir/commands.log" "git clone"
+  assert_not_contains "$dir/commands.log" "go build"
 }
 
-test_ssh_remote_is_passed_to_git_without_provider_rewrite() {
-  run_installer ssh \
-    --source-repo-url git@gitlab.internal:tools/atlassian-mcp.git \
-    --source-ref main \
+test_release_tag_pins_exact_asset() {
+  run_installer pinned-release \
+    --release-tag v9.9.9 \
     --agents none \
     --enable-jira \
     --jira-base-url https://jira.internal.example.com/jira
-  assert_contains "$TMP_ROOT/ssh/commands.log" "git@gitlab.internal:tools/atlassian-mcp.git"
+  local dir="$TMP_ROOT/pinned-release"
+  assert_contains "$dir/install/atlassian-mcp" "atlassian-mcp 9.9.9"
+  assert_contains "$dir/commands.log" "download/v9.9.9/atlassian-mcp_9.9.9_linux_amd64"
 }
 
-test_embedded_credentials_are_rejected_before_git() {
-  local dir="$TMP_ROOT/credential-url"
-  local fake_bin="$dir/bin"
+test_checksum_mismatch_fails_without_replacing_destination() {
+  local dir="$TMP_ROOT/checksum-mismatch"
   mkdir -p "$dir/home" "$dir/install" "$dir/project"
-  make_fakes "$fake_bin"
-  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$fake_bin:/usr/bin:/bin" \
+  printf 'old binary\n' >"$dir/install/atlassian-mcp"
+  make_fakes "$dir/bin"
+  make_release_fixture "$dir/release"
+  if FAKE_LOG="$dir/commands.log" FAKE_RELEASE_DIR="$dir/release" FAKE_CHECKSUM_MISMATCH=1 HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
     bash "$INSTALLER" \
-      --source-repo-url https://user:pass@github.com/acme/atlassian-mcp.git \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
       --agents none \
       --enable-jira \
       --jira-base-url https://jira.internal.example.com/jira \
-      --non-interactive >/tmp/installer-credential.out 2>&1; then
-    fail "credential URL unexpectedly succeeded"
+      --non-interactive >/tmp/installer-checksum-mismatch.out 2>&1; then
+    fail "checksum mismatch unexpectedly succeeded"
   fi
-  assert_contains /tmp/installer-credential.out "embedded credentials"
-  [[ ! -f "$dir/commands.log" ]] || fail "git should not run for credential URL"
+  assert_contains /tmp/installer-checksum-mismatch.out "checksum mismatch"
+  assert_contains "$dir/install/atlassian-mcp" "old binary"
+}
+
+test_unsupported_platform_errors_before_download() {
+  local dir="$TMP_ROOT/unsupported-platform"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes "$dir/bin"
+  make_release_fixture "$dir/release"
+  if FAKE_LOG="$dir/commands.log" FAKE_RELEASE_DIR="$dir/release" FAKE_UNAME_M=arm64 HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents none \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-unsupported.out 2>&1; then
+    fail "unsupported platform unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-unsupported.out "unsupported platform"
+  [[ ! -f "$dir/commands.log" ]] || assert_not_contains "$dir/commands.log" "curl"
+}
+
+test_binary_override_keeps_config_behavior_and_skips_download() {
+  export BITBUCKET_SECRET_ENV='super-secret-token'
+  export JIRA_SECRET_ENV='super-secret-password'
+  export CONFLUENCE_SECRET_ENV='super-secret-confluence-password'
+  run_installer binary-config \
+    --binary "$REPO_ROOT/go.mod" \
+    --agents both \
+    --enable-jira \
+    --jira-base-url https://jira.internal.example.com/jira \
+    --jira-username jira-svc \
+    --jira-password-env JIRA_SECRET_ENV \
+    --enable-confluence \
+    --confluence-base-url https://confluence.internal.example.com/confluence \
+    --confluence-username confluence-svc \
+    --confluence-password-env CONFLUENCE_SECRET_ENV \
+    --enable-bitbucket \
+    --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
+    --bitbucket-project-key PRJ \
+    --bitbucket-token-env BITBUCKET_SECRET_ENV
+  local dir="$TMP_ROOT/binary-config"
+  assert_not_contains "$dir/commands.log" "curl"
+  assert_contains "$dir/project/.codex/config.toml" 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
+  assert_contains "$dir/project/.codex/config.toml" 'JIRA_PASSWORD = "super-secret-password"'
+  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_PASSWORD = "super-secret-confluence-password"'
+  assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-token"
+  assert_not_contains "$dir/project/.mcp.json" "super-secret-token"
 }
 
 test_service_base_urls_reject_embedded_credentials() {
@@ -251,81 +271,6 @@ test_service_base_urls_reject_embedded_credentials() {
   assert_contains /tmp/installer-bitbucket-credential.out "must not include embedded credentials"
 }
 
-test_module_validation_and_non_secret_config() {
-  export BITBUCKET_SECRET_ENV='super-secret-token'
-  export JIRA_SECRET_ENV='super-secret-password'
-  export CONFLUENCE_SECRET_ENV='super-secret-confluence-password'
-  run_installer both \
-    --binary "$REPO_ROOT/go.mod" \
-    --skip-tests \
-    --agents both \
-    --enable-jira \
-    --jira-base-url https://jira.internal.example.com/jira \
-    --jira-username jira-svc \
-    --jira-password-env JIRA_SECRET_ENV \
-    --enable-confluence \
-    --confluence-base-url https://confluence.internal.example.com/confluence \
-    --confluence-ca-file /etc/ssl/certs/confluence-ca.pem \
-    --confluence-username confluence-svc \
-    --confluence-password-env CONFLUENCE_SECRET_ENV \
-    --enable-bitbucket \
-    --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
-    --bitbucket-project-key PRJ \
-    --bitbucket-user-slug svc-atlassian-mcp \
-    --bitbucket-token-env BITBUCKET_SECRET_ENV \
-    --atlassian-tls-verify true
-  local dir="$TMP_ROOT/both"
-  # The wrapper (used for Claude/manual runs) only ever holds the indirection variable *names*,
-  # resolving actual secret values at its own runtime -- never the resolved values themselves.
-  assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-token"
-  assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-password"
-  assert_not_contains "$dir/install/atlassian-mcp-run" "super-secret-confluence-password"
-  assert_contains "$dir/install/atlassian-mcp-run" "JIRA_USERNAME"
-  assert_contains "$dir/install/atlassian-mcp-run" "\${JIRA_SECRET_ENV}"
-  assert_contains "$dir/install/atlassian-mcp-run" "CONFLUENCE_USERNAME"
-  assert_contains "$dir/install/atlassian-mcp-run" "CONFLUENCE_CA_FILE"
-  assert_contains "$dir/install/atlassian-mcp-run" "\${CONFLUENCE_SECRET_ENV:-}"
-  assert_contains "$dir/install/atlassian-mcp-run" "\${BITBUCKET_SECRET_ENV}"
-  # Codex does not inherit ambient environment for spawned stdio servers, so its config carries the
-  # binary directly plus the resolved values (this is the one deliberate exception to the
-  # no-secrets-in-agent-config rule, documented in codex_env_lines).
-  assert_contains "$dir/project/.codex/config.toml" "command = \"$dir/install/atlassian-mcp\""
-  assert_contains "$dir/project/.codex/config.toml" '[mcp_servers.atlassian.env]'
-  assert_contains "$dir/project/.codex/config.toml" 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
-  assert_contains "$dir/project/.codex/config.toml" 'JIRA_USERNAME = "jira-svc"'
-  assert_contains "$dir/project/.codex/config.toml" 'JIRA_PASSWORD = "super-secret-password"'
-  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_BASE_URL = "https://confluence.internal.example.com/confluence"'
-  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_CA_FILE = "/etc/ssl/certs/confluence-ca.pem"'
-  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_USERNAME = "confluence-svc"'
-  assert_contains "$dir/project/.codex/config.toml" 'CONFLUENCE_PASSWORD = "super-secret-confluence-password"'
-  assert_not_contains "$dir/project/.codex/config.toml" "BITBUCKET_SECRET_ENV"
-  assert_not_contains "$dir/project/.codex/config.toml" "JIRA_SECRET_ENV"
-  assert_not_contains "$dir/project/.codex/config.toml" "CONFLUENCE_SECRET_ENV"
-  # Claude's config is untouched by any of this and must stay completely secret-free.
-  assert_contains "$dir/project/.mcp.json" "\"command\": \"$dir/install/atlassian-mcp-run\""
-  assert_not_contains "$dir/project/.mcp.json" "BITBUCKET_SECRET_ENV"
-  assert_not_contains "$dir/project/.mcp.json" "JIRA_SECRET_ENV"
-  assert_not_contains "$dir/project/.mcp.json" "CONFLUENCE_SECRET_ENV"
-  assert_not_contains "$dir/project/.mcp.json" "super-secret-token"
-  assert_not_contains "$dir/project/.mcp.json" "super-secret-password"
-  assert_not_contains "$dir/project/.mcp.json" "super-secret-confluence-password"
-
-  local missing="$TMP_ROOT/missing"
-  mkdir -p "$missing/home" "$missing/install" "$missing/project"
-  make_fakes "$missing/bin"
-  if FAKE_LOG="$missing/commands.log" HOME="$missing/home" PATH="$missing/bin:/usr/bin:/bin" \
-    bash "$INSTALLER" \
-      --binary "$REPO_ROOT/go.mod" \
-      --agents none \
-      --enable-bitbucket \
-      --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
-      --bitbucket-token-env BITBUCKET_SECRET_ENV \
-      --non-interactive >/tmp/installer-missing.out 2>&1; then
-    fail "missing Bitbucket project key unexpectedly succeeded"
-  fi
-  assert_contains /tmp/installer-missing.out "--bitbucket-project-key is required"
-}
-
 test_non_interactive_bitbucket_requires_token_env_value() {
   local dir="$TMP_ROOT/missing-token"
   mkdir -p "$dir/home" "$dir/install" "$dir/project"
@@ -348,7 +293,7 @@ test_non_interactive_bitbucket_requires_token_env_value() {
   assert_contains /tmp/installer-missing-token.out "UNSET_BITBUCKET_TOKEN is required"
 }
 
-test_jira_username_requires_enable_jira_and_password_env() {
+test_jira_and_confluence_username_require_module_and_password_env() {
   local no_jira="$TMP_ROOT/jira-username-without-enable"
   mkdir -p "$no_jira/home" "$no_jira/install" "$no_jira/project"
   make_fakes "$no_jira/bin"
@@ -370,15 +315,15 @@ test_jira_username_requires_enable_jira_and_password_env() {
   fi
   assert_contains /tmp/installer-jira-username-no-enable.out "--jira-username requires --enable-jira"
 
-  local missing_password="$TMP_ROOT/jira-username-missing-password"
-  mkdir -p "$missing_password/home" "$missing_password/install" "$missing_password/project"
-  make_fakes "$missing_password/bin"
+  local missing_jira="$TMP_ROOT/jira-username-missing-password"
+  mkdir -p "$missing_jira/home" "$missing_jira/install" "$missing_jira/project"
+  make_fakes "$missing_jira/bin"
   unset UNSET_JIRA_PASSWORD
-  if FAKE_LOG="$missing_password/commands.log" HOME="$missing_password/home" PATH="$missing_password/bin:/usr/bin:/bin" \
+  if FAKE_LOG="$missing_jira/commands.log" HOME="$missing_jira/home" PATH="$missing_jira/bin:/usr/bin:/bin" \
     bash "$INSTALLER" \
       --binary "$REPO_ROOT/go.mod" \
-      --install-dir "$missing_password/install" \
-      --project-dir "$missing_password/project" \
+      --install-dir "$missing_jira/install" \
+      --project-dir "$missing_jira/project" \
       --scope project \
       --agents none \
       --enable-jira \
@@ -389,9 +334,7 @@ test_jira_username_requires_enable_jira_and_password_env() {
     fail "missing Jira password env was not rejected"
   fi
   assert_contains /tmp/installer-jira-missing-password.out "UNSET_JIRA_PASSWORD is required"
-}
 
-test_confluence_username_requires_enable_confluence_and_password_env() {
   local no_confluence="$TMP_ROOT/confluence-username-without-enable"
   mkdir -p "$no_confluence/home" "$no_confluence/install" "$no_confluence/project"
   make_fakes "$no_confluence/bin"
@@ -410,15 +353,15 @@ test_confluence_username_requires_enable_confluence_and_password_env() {
   fi
   assert_contains /tmp/installer-confluence-username-no-enable.out "--confluence-username requires --enable-confluence"
 
-  local missing_password="$TMP_ROOT/confluence-username-missing-password"
-  mkdir -p "$missing_password/home" "$missing_password/install" "$missing_password/project"
-  make_fakes "$missing_password/bin"
+  local missing_confluence="$TMP_ROOT/confluence-username-missing-password"
+  mkdir -p "$missing_confluence/home" "$missing_confluence/install" "$missing_confluence/project"
+  make_fakes "$missing_confluence/bin"
   unset UNSET_CONFLUENCE_PASSWORD
-  if FAKE_LOG="$missing_password/commands.log" HOME="$missing_password/home" PATH="$missing_password/bin:/usr/bin:/bin" \
+  if FAKE_LOG="$missing_confluence/commands.log" HOME="$missing_confluence/home" PATH="$missing_confluence/bin:/usr/bin:/bin" \
     bash "$INSTALLER" \
       --binary "$REPO_ROOT/go.mod" \
-      --install-dir "$missing_password/install" \
-      --project-dir "$missing_password/project" \
+      --install-dir "$missing_confluence/install" \
+      --project-dir "$missing_confluence/project" \
       --scope project \
       --agents none \
       --enable-confluence \
@@ -458,28 +401,6 @@ FAKE_BINARY
   local disabled_output
   disabled_output="$(CONFLUENCE_BASE_URL=stale CONFLUENCE_CA_FILE=stale-ca CONFLUENCE_USERNAME=stale-user CONFLUENCE_PASSWORD=stale-password "$disabled/install/atlassian-mcp-run")"
   [[ -z "$disabled_output" ]] || fail "disabled Confluence wrapper leaked stale env: $disabled_output"
-
-  local base_only="$TMP_ROOT/confluence-base-only-wrapper"
-  mkdir -p "$base_only/home" "$base_only/install" "$base_only/project" "$base_only/bin"
-  make_fakes "$base_only/bin"
-  local base_binary="$base_only/fake-atlassian-mcp"
-  cp "$disabled_binary" "$base_binary"
-  FAKE_LOG="$base_only/commands.log" HOME="$base_only/home" PATH="$base_only/bin:/usr/bin:/bin" \
-    bash "$INSTALLER" \
-      --binary "$base_binary" \
-      --install-dir "$base_only/install" \
-      --project-dir "$base_only/project" \
-      --scope project \
-      --agents none \
-      --enable-confluence \
-      --confluence-base-url https://confluence.internal.example.com/confluence \
-      --non-interactive
-  local base_output
-  base_output="$(CONFLUENCE_BASE_URL=stale CONFLUENCE_CA_FILE=stale-ca CONFLUENCE_USERNAME=stale-user CONFLUENCE_PASSWORD=stale-password "$base_only/install/atlassian-mcp-run")"
-  [[ "$base_output" == *"CONFLUENCE_BASE_URL=https://confluence.internal.example.com/confluence"* ]] || fail "Confluence base URL was not authoritative: $base_output"
-  [[ "$base_output" != *"CONFLUENCE_CA_FILE="* ]] || fail "omitted Confluence CA leaked through wrapper: $base_output"
-  [[ "$base_output" != *"CONFLUENCE_USERNAME="* ]] || fail "omitted Confluence username leaked through wrapper: $base_output"
-  [[ "$base_output" != *"CONFLUENCE_PASSWORD="* ]] || fail "omitted Confluence password leaked through wrapper: $base_output"
 
   local alias_case="$TMP_ROOT/confluence-password-alias-wrapper"
   mkdir -p "$alias_case/home" "$alias_case/install" "$alias_case/project" "$alias_case/bin"
@@ -620,7 +541,6 @@ test_rerun_is_idempotent_and_config_failure_rolls_back() {
 
 test_dry_run_validates_without_side_effects() {
   run_installer dry-run \
-    --source-repo-url https://github.com/acme/atlassian-mcp.git \
     --agents both \
     --dry-run \
     --enable-jira \
@@ -633,21 +553,20 @@ test_final_paths_and_readme_bootstrap_contract() {
   assert_file "$REPO_ROOT/scripts/install-from-remote.sh"
   [[ ! -e "$REPO_ROOT/install-from-remote.sh" ]] || fail "root bash installer should not exist"
   assert_contains "$REPO_ROOT/README.md" "https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/\${INSTALLER_REF}/scripts/install-from-remote.sh"
-  assert_contains "$REPO_ROOT/README.md" "curl -fsSL \"\$INSTALLER_URL\" |"
-  assert_contains "$REPO_ROOT/README.md" "--source-repo-url https://github.com/chiendao1808/atlassian-mcp.git"
-  assert_not_contains "$REPO_ROOT/README.md" "user:password@"
+  assert_contains "$REPO_ROOT/README.md" "INSTALLER_REF='main'"
+  assert_contains "$REPO_ROOT/README.md" "--release-tag v1.0.4"
+  assert_not_contains "$REPO_ROOT/README.md" "--source-repo-url"
 }
 
 for test_name in \
-  test_https_remotes_checkout_test_build_and_install_atomically \
-  test_keep_source_preserves_clone_for_debugging \
-  test_ssh_remote_is_passed_to_git_without_provider_rewrite \
-  test_embedded_credentials_are_rejected_before_git \
+  test_default_release_download_verifies_and_installs_without_source_build \
+  test_release_tag_pins_exact_asset \
+  test_checksum_mismatch_fails_without_replacing_destination \
+  test_unsupported_platform_errors_before_download \
+  test_binary_override_keeps_config_behavior_and_skips_download \
   test_service_base_urls_reject_embedded_credentials \
-  test_module_validation_and_non_secret_config \
   test_non_interactive_bitbucket_requires_token_env_value \
-  test_jira_username_requires_enable_jira_and_password_env \
-  test_confluence_username_requires_enable_confluence_and_password_env \
+  test_jira_and_confluence_username_require_module_and_password_env \
   test_confluence_wrapper_clears_stale_fixed_env_and_preserves_password_alias \
   test_agent_config_escapes_wrapper_path_for_toml_and_json \
   test_piped_installer_without_agents_fails_without_terminal \

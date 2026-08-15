@@ -1,8 +1,5 @@
 param(
-    [string]$SourceRepoUrl = '',
-    [string]$SourceRef = 'main',
-    [int]$SourceCloneDepth = 1,
-    [switch]$KeepSource,
+    [string]$ReleaseTag = '',
     [string]$Binary = '',
     [string]$InstallDir = (Join-Path $HOME '.local\bin'),
     [ValidateSet('Claude', 'Codex', 'Both', 'None')]
@@ -28,7 +25,6 @@ param(
     [string]$BitbucketCaFile = '',
     [ValidateSet('true', 'false')]
     [string]$AtlassianTlsVerify = 'false',
-    [switch]$SkipTests,
     [switch]$DryRun,
     [switch]$Replace,
     [switch]$NonInteractive
@@ -40,8 +36,9 @@ $ErrorActionPreference = 'Stop'
 $Marker = 'atlassian-mcp managed block'
 $ManagedConfluenceEnvKeys = @('CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')
 $Script:Backups = @()
-$Script:SourceDir = ''
+$Script:DownloadDir = ''
 $Script:InstallSucceeded = $false
+$ReleaseDownloadTimeoutSec = 120
 
 # Emits a validation or execution failure with the stable installer name for callers and tests.
 function Die($Message) {
@@ -85,13 +82,6 @@ function Require-ServiceUrl($Name, $Value) {
     $authority = ([string]$Value -replace '^[^:]+://', '') -replace '/.*$', ''
     if ($authority -match '@') {
         Die "$Name must not include embedded credentials"
-    }
-}
-
-# Rejects credential-bearing HTTPS source URLs before Git can log or persist them.
-function Reject-EmbeddedSourceCredentials($Value) {
-    if ($Value -match '^https?://[^/?#]*@') {
-        Die '-SourceRepoUrl must not include embedded credentials'
     }
 }
 
@@ -463,61 +453,70 @@ function Configure-Agents($Command, $EnvVars) {
     }
 }
 
-# Clones a provider-neutral remote, fetches the requested ref, and verifies the worktree has HEAD.
-function Clone-Source {
-    $Script:SourceDir = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-src-{0}" -f ([guid]::NewGuid().ToString('N')))
-    Invoke-Checked 'git' @('clone', '--depth', ([string]$SourceCloneDepth), $SourceRepoUrl, $Script:SourceDir)
-    Push-Location $Script:SourceDir
-    try {
-        & git @('fetch', '--depth', ([string]$SourceCloneDepth), 'origin', $SourceRef) | Out-Null
-        Invoke-Checked 'git' @('checkout', $SourceRef)
-        Invoke-Checked 'git' @('rev-parse', '--verify', 'HEAD')
-    } finally {
-        Pop-Location
+# Resolves the release asset suffix supported by this installer.
+function Get-ReleasePlatform {
+    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows) -or
+        [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+        Die ("unsupported platform: {0}/{1} (supported: Windows amd64)" -f [System.Runtime.InteropServices.RuntimeInformation]::OSDescription, [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)
     }
+    return 'windows_amd64.exe'
 }
 
-# Runs repository tests unless skipped, then builds cmd/atlassian-mcp into a temporary executable.
-function Build-Binary {
-    $out = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-build-{0}.exe" -f ([guid]::NewGuid().ToString('N')))
-    Push-Location $Script:SourceDir
-    try {
-        if (-not $SkipTests) {
-            Invoke-Checked 'go' @('test', './...')
-        }
-        Invoke-Checked 'go' @('build', '-o', $out, './cmd/atlassian-mcp')
-    } finally {
-        Pop-Location
+# Uses GitHub's latest stable release API unless the caller pins an exact tag.
+function Resolve-ReleaseTag {
+    if (-not [string]::IsNullOrEmpty($ReleaseTag)) {
+        return $ReleaseTag
     }
-    return $out
+    $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec $ReleaseDownloadTimeoutSec -Uri 'https://api.github.com/repos/chiendao1808/atlassian-mcp/releases/latest'
+    $payload = $response.Content | ConvertFrom-Json
+    if ([string]::IsNullOrEmpty($payload.tag_name)) {
+        Die 'could not resolve latest GitHub release tag'
+    }
+    return [string]$payload.tag_name
 }
 
-# Removes cloned source after install, unless -KeepSource was requested for debugging.
-function Cleanup-Source {
-    if (-not $KeepSource -and -not [string]::IsNullOrEmpty($Script:SourceDir)) {
-        $sourceDir = $Script:SourceDir
-        Remove-Item -LiteralPath $sourceDir -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $sourceDir) {
-            Write-Warning "could not clean cloned source $sourceDir"
-        } else {
-            Write-Host "cleaned cloned source $sourceDir"
-            $Script:SourceDir = ''
-        }
+# Downloads the platform release binary and verifies it against the release checksum manifest.
+function Download-ReleaseBinary {
+    $platform = Get-ReleasePlatform
+    $tag = Resolve-ReleaseTag
+    $version = $tag.TrimStart('v')
+    $asset = "atlassian-mcp_${version}_${platform}"
+    $checksumAsset = "atlassian-mcp_${version}_checksums.txt"
+    $baseUrl = "https://github.com/chiendao1808/atlassian-mcp/releases/download/$tag"
+    $Script:DownloadDir = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-release-{0}" -f ([guid]::NewGuid().ToString('N')))
+    New-Item -ItemType Directory -Force -Path $Script:DownloadDir | Out-Null
+
+    $assetPath = Join-Path $Script:DownloadDir $asset
+    $checksumPath = Join-Path $Script:DownloadDir $checksumAsset
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec $ReleaseDownloadTimeoutSec -Uri "$baseUrl/$asset" -OutFile $assetPath
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec $ReleaseDownloadTimeoutSec -Uri "$baseUrl/$checksumAsset" -OutFile $checksumPath
+    $pattern = '(^|\s)\*?{0}$' -f [regex]::Escape($asset)
+    $line = Get-Content -LiteralPath $checksumPath | Where-Object { $_ -match $pattern } | Select-Object -First 1
+    if ([string]::IsNullOrEmpty($line)) {
+        Die "checksum entry not found for $asset"
+    }
+    $expected = (($line -split '\s+')[0]).ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $assetPath).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Die "checksum mismatch for $asset"
+    }
+    return $assetPath
+}
+
+# Removes temporary release downloads after success or failure.
+function Cleanup-Download {
+    if (-not [string]::IsNullOrEmpty($Script:DownloadDir)) {
+        Remove-Item -LiteralPath $Script:DownloadDir -Recurse -Force -ErrorAction SilentlyContinue
+        $Script:DownloadDir = ''
     }
 }
 
 try {
-    if ([string]::IsNullOrEmpty($Binary) -and [string]::IsNullOrEmpty($SourceRepoUrl)) {
-        Die '-SourceRepoUrl is required unless -Binary is used'
-    }
-    if (-not [string]::IsNullOrEmpty($SourceRepoUrl)) {
-        Reject-EmbeddedSourceCredentials $SourceRepoUrl
-        if ($SourceRepoUrl -notmatch '^(https?://|git@|ssh://)') {
-            Die '-SourceRepoUrl must be HTTPS or SSH'
-        }
-    }
     if (-not [string]::IsNullOrEmpty($Binary) -and -not (Test-Path -LiteralPath $Binary -PathType Leaf)) {
         Die '-Binary must point to a readable file'
+    }
+    if (-not [string]::IsNullOrEmpty($ReleaseTag) -and $ReleaseTag -notmatch '^v[0-9]+[.][0-9]+[.][0-9]+([-+][A-Za-z0-9._-]+)?$') {
+        Die '-ReleaseTag must look like v1.2.3'
     }
     if ([string]::IsNullOrEmpty($Agents)) {
         if ($NonInteractive) {
@@ -583,8 +582,7 @@ try {
     if (-not [string]::IsNullOrEmpty($Binary)) {
         $builtBinary = $Binary
     } else {
-        Clone-Source
-        $builtBinary = Build-Binary
+        $builtBinary = Download-ReleaseBinary
     }
 
     $installedBinary = Join-Path $InstallDir 'atlassian-mcp.exe'
@@ -605,9 +603,9 @@ try {
     Write-Host "installed atlassian-mcp to $installedBinary"
     Write-Host 'restart Claude Code, Codex, or your terminal session to pick up the newly persisted environment variables'
     $Script:InstallSucceeded = $true
-    Cleanup-Source
+    Cleanup-Download
 } finally {
     if (-not $Script:InstallSucceeded) {
-        Cleanup-Source
+        Cleanup-Download
     }
 }

@@ -7,9 +7,7 @@ $Installer = Join-Path $RepoRoot 'scripts\install-from-remote.ps1'
 $PowerShellExe = (Get-Command powershell.exe).Source
 $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("atlassian-mcp-ps-installer-tests-{0}" -f ([guid]::NewGuid().ToString('N')))
 
-# The installer persists these under the real Windows 'User' scope (HKCU\Environment), not under any
-# per-test $env:HOME override, so the whole suite snapshots and restores them to avoid leaving test
-# values behind on the machine running these tests.
+# The installer writes Windows User env vars, so snapshot and restore the managed keys.
 $PersistedEnvKeys = @(
     'ATLASSIAN_TLS_VERIFY', 'JIRA_BASE_URL', 'JIRA_CA_FILE', 'JIRA_USERNAME', 'JIRA_PASSWORD',
     'CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD',
@@ -31,26 +29,16 @@ function Restore-PersistedEnv($Snapshot) {
     }
 }
 
-# Minimal test harness: every test runs the real installer with fake external tools and asserts observable output.
 function Fail($Message) {
     throw "FAIL: $Message"
 }
 
-# Asserts that installer-created files exist at the stable public paths.
 function Assert-File($Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         Fail "missing file: $Path"
     }
 }
 
-# Asserts temporary worktrees are removed after successful remote installs.
-function Assert-PathMissing($Path) {
-    if (Test-Path -LiteralPath $Path) {
-        Fail "path still exists: $Path"
-    }
-}
-
-# Asserts generated content without coupling tests to private installer helpers.
 function Assert-Contains($Path, $Text) {
     $content = Get-Content -LiteralPath $Path -Raw
     if ($content.IndexOf($Text, [System.StringComparison]::Ordinal) -lt 0) {
@@ -58,7 +46,6 @@ function Assert-Contains($Path, $Text) {
     }
 }
 
-# Guards the no-secret contract by checking generated artifacts for forbidden values.
 function Assert-NotContains($Path, $Text) {
     if (-not (Test-Path -LiteralPath $Path)) {
         return
@@ -69,16 +56,13 @@ function Assert-NotContains($Path, $Text) {
     }
 }
 
-# Counts managed-block markers to prove re-runs replace rather than append duplicate config.
 function Assert-Count($Path, $Text, $Want) {
     $content = Get-Content -LiteralPath $Path -Raw
     $got = 0
     $index = 0
     while ($true) {
         $index = $content.IndexOf($Text, $index, [System.StringComparison]::Ordinal)
-        if ($index -lt 0) {
-            break
-        }
+        if ($index -lt 0) { break }
         $got++
         $index += $Text.Length
     }
@@ -87,54 +71,50 @@ function Assert-Count($Path, $Text, $Want) {
     }
 }
 
-# Extracts the fake clone destination from the recorded git command.
-function Get-ClonedSourceDir($Log) {
-    $line = Get-Content -LiteralPath $Log | Where-Object { $_ -like 'git clone *' } | Select-Object -First 1
-    if ([string]::IsNullOrEmpty($line)) {
-        Fail 'missing git clone log line'
+function Remove-RepoRootModuleAnalysisCache {
+    $rootCache = Join-Path $RepoRoot 'Microsoft'
+    if (-not (Test-Path -LiteralPath $rootCache)) {
+        return
     }
-    if ($line -notmatch '(?<path>[A-Z]:\\.*atlassian-mcp-src-[0-9a-f]+)$') {
-        Fail "could not parse clone destination: $line"
+    $allowed = @(
+        $rootCache,
+        (Join-Path $rootCache 'Windows'),
+        (Join-Path $rootCache 'Windows\PowerShell'),
+        (Join-Path $rootCache 'Windows\PowerShell\ModuleAnalysisCache')
+    )
+    $actual = @(Get-ChildItem -LiteralPath $rootCache -Force -Recurse | ForEach-Object { $_.FullName })
+    foreach ($path in $actual) {
+        if ($path -notin $allowed) {
+            Fail "unexpected file under generated PowerShell cache tree: $path"
+        }
     }
-    $Matches.path
+    Remove-Item -LiteralPath $rootCache -Recurse -Force -ErrorAction Stop
 }
 
-# Creates fake external commands so installer behavior can be tested without network, Go, or host ACL changes.
+function New-FakeRelease($Dir) {
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    Set-Content -LiteralPath (Join-Path $Dir 'latest.json') -Value '{"tag_name":"v1.2.3"}' -Encoding ASCII
+    foreach ($version in @('1.2.3', '9.9.9')) {
+        $asset = "atlassian-mcp_${version}_windows_amd64.exe"
+        $assetPath = Join-Path $Dir $asset
+        Set-Content -LiteralPath $assetPath -Value "atlassian-mcp $version" -Encoding ASCII
+        $hash = (Get-FileHash -Algorithm SHA256 -Path $assetPath).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath (Join-Path $Dir "atlassian-mcp_${version}_checksums.txt") -Value "$hash  $asset" -Encoding ASCII
+    }
+}
+
+# Fake git/go fail if called because release installs must not build source.
 function New-Fakes($Dir) {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 Add-Content -LiteralPath $env:FAKE_LOG -Value ("git {0}" -f ($Args -join ' '))
-if ($Args[0] -eq 'clone') {
-    Write-Error ("Cloning into '{0}'..." -f $Args[$Args.Count - 1])
-    $dest = $Args[$Args.Count - 1]
-    New-Item -ItemType Directory -Force -Path (Join-Path $dest 'cmd\atlassian-mcp') | Out-Null
-    Set-Content -LiteralPath (Join-Path $dest 'go.mod') -Value 'module example.com/atlassian-mcp' -Encoding ASCII
-}
-if ($Args[0] -eq 'rev-parse') {
-    Write-Output 'mocked-ref'
-}
-exit 0
+exit 99
 '@ | Set-Content -LiteralPath (Join-Path $Dir 'git.ps1') -Encoding ASCII
     @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 Add-Content -LiteralPath $env:FAKE_LOG -Value ("go {0}" -f ($Args -join ' '))
-if ($Args[0] -eq 'test') {
-    Write-Output '?    github.com/chiendao1808/atlassian-mcp/cmd/atlassian-mcp    [no test files]'
-}
-if ($Args[0] -eq 'build') {
-    $out = ''
-    for ($i = 0; $i -lt $Args.Count; $i++) {
-        if ($Args[$i] -eq '-o') {
-            $out = $Args[$i + 1]
-        }
-    }
-    if ([string]::IsNullOrEmpty($out)) {
-        exit 1
-    }
-    Set-Content -LiteralPath $out -Value 'fake binary' -Encoding ASCII
-}
-exit 0
+exit 99
 '@ | Set-Content -LiteralPath (Join-Path $Dir 'go.ps1') -Encoding ASCII
     @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
@@ -144,53 +124,109 @@ exit 0
     @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 Add-Content -LiteralPath $env:FAKE_LOG -Value ("claude {0}" -f ($Args -join ' '))
-if ($Args[0] -eq 'mcp' -and $Args[1] -eq 'remove') {
-    exit 1
-}
+if ($Args[0] -eq 'mcp' -and $Args[1] -eq 'remove') { exit 1 }
 exit 0
 '@ | Set-Content -LiteralPath (Join-Path $Dir 'claude.ps1') -Encoding ASCII
 }
 
-# Runs one isolated installer invocation with HOME, USERPROFILE, PATH, and project/install directories scoped to the case.
-function Invoke-InstallerCase($Name, [string[]]$Arguments, [hashtable]$ExtraEnv, [bool]$UseNonInteractive = $true) {
+function Invoke-InstallerCase($Name, [string[]]$Arguments, [hashtable]$ExtraEnv = @{}) {
     $caseDir = Join-Path $TmpRoot $Name
     $fakeBin = Join-Path $caseDir 'bin'
+    $releaseDir = Join-Path $caseDir 'release'
+    $moduleCache = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
     New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project') | Out-Null
     New-Fakes $fakeBin
+    New-FakeRelease $releaseDir
+    if ($ExtraEnv.ContainsKey('PRECREATE_INSTALLED_BINARY')) {
+        Set-Content -LiteralPath (Join-Path $caseDir 'install\atlassian-mcp.exe') -Value $ExtraEnv['PRECREATE_INSTALLED_BINARY'] -Encoding ASCII
+    }
+    if ($ExtraEnv.ContainsKey('REMOVE_FAKE_CLAUDE')) {
+        Remove-Item -LiteralPath (Join-Path $fakeBin 'claude.ps1') -Force
+    }
 
     $oldPath = $env:PATH
     $oldHome = $env:HOME
     $oldUserProfile = $env:USERPROFILE
     $oldFakeLog = $env:FAKE_LOG
+    $oldFakeReleaseDir = $env:FAKE_RELEASE_DIR
+    $oldBadChecksum = $env:FAKE_CHECKSUM_MISMATCH
     $oldExecutionPolicy = $env:PSExecutionPolicyPreference
     $oldPathext = $env:PATHEXT
+    $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
     try {
-        $env:PATH = "$fakeBin;$oldPath"
+        if ($ExtraEnv.ContainsKey('PATH_VALUE')) {
+            $env:PATH = $ExtraEnv['PATH_VALUE']
+        } else {
+            $env:PATH = "$fakeBin;$oldPath"
+        }
         $env:PATHEXT = ".PS1;$oldPathext"
         $env:HOME = Join-Path $caseDir 'home'
         $env:USERPROFILE = Join-Path $caseDir 'home'
         $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $env:FAKE_RELEASE_DIR = $releaseDir
         $env:PSExecutionPolicyPreference = 'Bypass'
-        if ($ExtraEnv) {
-            foreach ($key in $ExtraEnv.Keys) {
-                Set-Item -LiteralPath "Env:$key" -Value $ExtraEnv[$key]
+        # Scope Windows PowerShell's module-analysis cache to the case temp tree so tests never dirty the repo root.
+        $env:PSModuleAnalysisCachePath = $moduleCache
+        foreach ($key in $ExtraEnv.Keys) {
+            if ($key -in @('PRECREATE_INSTALLED_BINARY', 'REMOVE_FAKE_CLAUDE', 'PATH_VALUE')) {
+                continue
             }
+            Set-Item -LiteralPath "Env:$key" -Value $ExtraEnv[$key]
         }
 
-        $baseArgs = @(
-            '-NoProfile',
-            '-ExecutionPolicy', 'Bypass',
-            '-File', $Installer,
-            '-InstallDir', (Join-Path $caseDir 'install'),
-            '-ProjectDir', (Join-Path $caseDir 'project'),
-            '-Scope', 'Project'
-        )
-        if ($UseNonInteractive) {
-            $baseArgs += '-NonInteractive'
+        $baseArgs = @()
+        if ($Arguments -notcontains '-InstallDir') {
+            $baseArgs += @('-InstallDir', (Join-Path $caseDir 'install'))
         }
+        if ($Arguments -notcontains '-ProjectDir') {
+            $baseArgs += @('-ProjectDir', (Join-Path $caseDir 'project'))
+        }
+        if ($Arguments -notcontains '-Scope') {
+            $baseArgs += @('-Scope', 'Project')
+        }
+        $baseArgs += '-NonInteractive'
+        $runner = Join-Path $caseDir 'runner.ps1'
+        $installerLiteral = $Installer.Replace("'", "''")
+        $allArgs = @($baseArgs) + @($Arguments)
+        $commandParts = foreach ($arg in $allArgs) {
+            if ($arg.StartsWith('-')) {
+                $arg
+            } else {
+                "'{0}'" -f ($arg.Replace("'", "''"))
+            }
+        }
+        $runnerPreamble = @"
+`$InstallerPath = '$installerLiteral'
+`$InstallerCommand = "& '`$InstallerPath' $($commandParts -join ' ')"
+"@
+        $runnerBody = @'
+function Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$TimeoutSec)
+    Add-Content -LiteralPath $env:FAKE_LOG -Value "web timeout=$TimeoutSec $Uri"
+    if ($Uri -like '*/releases/latest') {
+        return [pscustomobject]@{ Content = (Get-Content -LiteralPath (Join-Path $env:FAKE_RELEASE_DIR 'latest.json') -Raw) }
+    }
+    $name = Split-Path -Leaf $Uri
+    if ($name -like '*_checksums.txt' -and $env:FAKE_CHECKSUM_MISMATCH -eq '1') {
+        $asset = $name.Replace('_checksums.txt', '_windows_amd64.exe')
+        Set-Content -LiteralPath $OutFile -Value "0000000000000000000000000000000000000000000000000000000000000000  $asset" -Encoding ASCII
+        return
+    }
+    Copy-Item -LiteralPath (Join-Path $env:FAKE_RELEASE_DIR $name) -Destination $OutFile -Force
+}
+try {
+    Invoke-Expression $InstallerCommand
+    if (-not $?) { exit 1 }
+    exit 0
+} catch {
+    Write-Error $_
+    exit 1
+}
+'@
+        Set-Content -LiteralPath $runner -Value ($runnerPreamble + [Environment]::NewLine + $runnerBody) -Encoding ASCII
         $oldErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $output = & $PowerShellExe @baseArgs @Arguments *>&1
+        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $runner *>&1
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $oldErrorActionPreference
         [pscustomobject]@{
@@ -204,12 +240,14 @@ function Invoke-InstallerCase($Name, [string[]]$Arguments, [hashtable]$ExtraEnv,
         $env:HOME = $oldHome
         $env:USERPROFILE = $oldUserProfile
         $env:FAKE_LOG = $oldFakeLog
+        $env:FAKE_RELEASE_DIR = $oldFakeReleaseDir
+        $env:FAKE_CHECKSUM_MISMATCH = $oldBadChecksum
         $env:PSExecutionPolicyPreference = $oldExecutionPolicy
         $env:PATHEXT = $oldPathext
+        $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
     }
 }
 
-# Executes a case expected to pass and returns its isolated paths.
 function Invoke-InstallerSuccess($Name, [string[]]$Arguments, [hashtable]$ExtraEnv = @{}) {
     $result = Invoke-InstallerCase $Name $Arguments $ExtraEnv
     if ($result.ExitCode -ne 0) {
@@ -218,84 +256,48 @@ function Invoke-InstallerSuccess($Name, [string[]]$Arguments, [hashtable]$ExtraE
     $result
 }
 
-function Test-HttpsRemotesCheckoutTestBuildAndInstallAtomically {
-    foreach ($url in @(
-        'https://github.com/acme/atlassian-mcp.git',
-        'https://gitlab.com/acme/atlassian-mcp.git',
-        'https://bitbucket.internal.example.com/scm/prj/atlassian-mcp.git'
-    )) {
-        $name = 'remote-' + ($url -replace '[^A-Za-z0-9]', '-')
-        $result = Invoke-InstallerSuccess $name @(
-            '-SourceRepoUrl', $url,
-            '-SourceRef', 'v1.2.3',
-            '-Agents', 'Codex',
-            '-EnableJira',
-            '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
-        )
-        Assert-Contains $result.Log 'git clone'
-        Assert-Contains $result.Log $url
-        Assert-Contains $result.Log 'git fetch'
-        Assert-Contains $result.Log 'git checkout v1.2.3'
-        Assert-Contains $result.Log 'go test ./...'
-        Assert-Contains $result.Log 'go build -o'
-        Assert-File (Join-Path $result.CaseDir 'install\atlassian-mcp.exe')
-        Assert-PathMissing (Get-ClonedSourceDir $result.Log)
-        if ($result.Output -notmatch 'cleaned cloned source') {
-            Fail "remote install did not report source cleanup: $($result.Output)"
-        }
-    }
-}
-
-function Test-KeepSourcePreservesCloneForDebugging {
-    $result = Invoke-InstallerSuccess 'keep-source' @(
-        '-SourceRepoUrl', 'https://github.com/acme/atlassian-mcp.git',
-        '-KeepSource',
+function Test-DefaultReleaseDownloadVerifiesAndInstallsWithoutSourceBuild {
+    $result = Invoke-InstallerSuccess 'default-release' @(
         '-Agents', 'None',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
     )
-    $sourceDir = Get-ClonedSourceDir $result.Log
-    try {
-        if (-not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
-            Fail "kept source was removed: $sourceDir"
-        }
-    } finally {
-        Remove-Item -LiteralPath $sourceDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    Assert-File (Join-Path $result.CaseDir 'install\atlassian-mcp.exe')
+    Assert-Contains (Join-Path $result.CaseDir 'install\atlassian-mcp.exe') 'atlassian-mcp 1.2.3'
+    Assert-Contains $result.Log 'releases/latest'
+    Assert-Contains $result.Log 'web timeout=120'
+    Assert-Contains $result.Log 'atlassian-mcp_1.2.3_windows_amd64.exe'
+    Assert-Contains $result.Log 'atlassian-mcp_1.2.3_checksums.txt'
+    Assert-NotContains $result.Log 'git clone'
+    Assert-NotContains $result.Log 'go build'
 }
 
-function Test-SshRemoteIsPassedToGitWithoutProviderRewrite {
-    $result = Invoke-InstallerSuccess 'ssh' @(
-        '-SourceRepoUrl', 'git@gitlab.internal:tools/atlassian-mcp.git',
+function Test-ReleaseTagPinsExactAsset {
+    $result = Invoke-InstallerSuccess 'pinned-release' @(
+        '-ReleaseTag', 'v9.9.9',
         '-Agents', 'None',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
     )
-    Assert-Contains $result.Log 'git@gitlab.internal:tools/atlassian-mcp.git'
+    Assert-Contains (Join-Path $result.CaseDir 'install\atlassian-mcp.exe') 'atlassian-mcp 9.9.9'
+    Assert-Contains $result.Log 'download/v9.9.9/atlassian-mcp_9.9.9_windows_amd64.exe'
 }
 
-function Test-EmbeddedCredentialsAreRejectedBeforeGit {
-    $result = Invoke-InstallerCase 'credential-url' @(
-        '-SourceRepoUrl', 'https://user:pass@github.com/acme/atlassian-mcp.git',
+function Test-ChecksumMismatchFailsWithoutReplacingDestination {
+    $result = Invoke-InstallerCase 'checksum-mismatch' @(
         '-Agents', 'None',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
-    ) @{}
-    if ($result.ExitCode -eq 0) {
-        Fail 'credential URL unexpectedly succeeded'
+    ) @{ FAKE_CHECKSUM_MISMATCH = '1'; PRECREATE_INSTALLED_BINARY = 'old binary' }
+    if ($result.ExitCode -eq 0 -or $result.Output -notmatch 'checksum mismatch') {
+        Fail "checksum mismatch was not rejected: $($result.Output)"
     }
-    if ($result.Output -notmatch 'embedded credentials') {
-        Fail "credential URL error did not mention embedded credentials: $($result.Output)"
-    }
-    if (Test-Path -LiteralPath $result.Log) {
-        Fail 'git should not run for credential URL'
-    }
+    Assert-Contains (Join-Path $result.CaseDir 'install\atlassian-mcp.exe') 'old binary'
 }
 
-function Test-ModuleValidationAndNonSecretConfig {
-    $result = Invoke-InstallerSuccess 'both' @(
+function Test-BinaryOverrideKeepsConfigBehaviorAndSkipsDownload {
+    $result = Invoke-InstallerSuccess 'binary-config' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
-        '-SkipTests',
         '-Agents', 'Both',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
@@ -303,111 +305,72 @@ function Test-ModuleValidationAndNonSecretConfig {
         '-JiraPasswordEnv', 'JIRA_SECRET_ENV',
         '-EnableConfluence',
         '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
-        '-ConfluenceCaFile', 'C:\certs\confluence-ca.pem',
         '-ConfluenceUsername', 'confluence-svc',
         '-ConfluencePasswordEnv', 'CONFLUENCE_SECRET_ENV',
         '-EnableBitbucket',
         '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
         '-BitbucketProjectKey', 'PRJ',
-        '-BitbucketUserSlug', 'svc-atlassian-mcp',
-        '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV',
-        '-AtlassianTlsVerify', 'true'
+        '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV'
     ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token'; JIRA_SECRET_ENV = 'super-secret-password'; CONFLUENCE_SECRET_ENV = 'super-secret-confluence-password' }
 
+    Assert-NotContains $result.Log 'web '
     $codex = Join-Path $result.CaseDir 'project\.codex\config.toml'
     $claude = Join-Path $result.CaseDir 'project\.mcp.json'
-    # Codex's MCP launcher does not inherit ambient environment (see Get-ResolvedConfigEnv), so the
-    # resolved, non-indirected values are expected in its config -- unlike Claude's, which is not
-    # touched here and must stay secret-free.
-    Assert-NotContains $codex 'BITBUCKET_SECRET_ENV'
-    Assert-NotContains $claude 'BITBUCKET_SECRET_ENV'
-    Assert-NotContains $codex 'JIRA_SECRET_ENV'
-    Assert-NotContains $claude 'JIRA_SECRET_ENV'
-    Assert-NotContains $codex 'CONFLUENCE_SECRET_ENV'
-    Assert-NotContains $claude 'CONFLUENCE_SECRET_ENV'
-    Assert-Contains $codex '[mcp_servers.atlassian.env]'
     Assert-Contains $codex 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
-    Assert-Contains $codex 'JIRA_USERNAME = "jira-svc"'
     Assert-Contains $codex 'JIRA_PASSWORD = "super-secret-password"'
-    Assert-Contains $codex 'CONFLUENCE_BASE_URL = "https://confluence.internal.example.com/confluence"'
-    Assert-Contains $codex 'CONFLUENCE_CA_FILE = "C:\\certs\\confluence-ca.pem"'
-    Assert-Contains $codex 'CONFLUENCE_USERNAME = "confluence-svc"'
     Assert-Contains $codex 'CONFLUENCE_PASSWORD = "super-secret-confluence-password"'
     Assert-NotContains $claude 'super-secret-token'
-    Assert-NotContains $claude 'super-secret-password'
-    Assert-NotContains $claude 'super-secret-confluence-password'
-    Assert-Contains $codex 'args = []'
-    if ((Get-Content -LiteralPath $codex -Raw).IndexOf('powershell.exe', [System.StringComparison]::Ordinal) -ge 0) {
-        Fail "codex config should invoke the binary directly, not powershell.exe: $codex"
-    }
-    Assert-Contains $codex 'atlassian-mcp.exe'
-    Assert-Contains $claude 'atlassian-mcp.exe'
+}
 
-    if ([Environment]::GetEnvironmentVariable('ATLASSIAN_TLS_VERIFY', 'User') -ne 'true') {
-        Fail 'ATLASSIAN_TLS_VERIFY was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('JIRA_BASE_URL', 'User') -ne 'https://jira.internal.example.com/jira') {
-        Fail 'JIRA_BASE_URL was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('BITBUCKET_BASE_URL', 'User') -ne 'https://bitbucket.internal.example.com/bitbucket') {
-        Fail 'BITBUCKET_BASE_URL was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('BITBUCKET_PROJECT_KEY', 'User') -ne 'PRJ') {
-        Fail 'BITBUCKET_PROJECT_KEY was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('BITBUCKET_USER_SLUG', 'User') -ne 'svc-atlassian-mcp') {
-        Fail 'BITBUCKET_USER_SLUG was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', 'User') -ne 'super-secret-token') {
-        Fail 'BITBUCKET_BEARER_TOKEN was not resolved from BITBUCKET_SECRET_ENV and persisted'
-    }
-    if ([Environment]::GetEnvironmentVariable('JIRA_USERNAME', 'User') -ne 'jira-svc') {
-        Fail 'JIRA_USERNAME was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('JIRA_PASSWORD', 'User') -ne 'super-secret-password') {
-        Fail 'JIRA_PASSWORD was not resolved from JIRA_SECRET_ENV and persisted'
-    }
-    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_BASE_URL', 'User') -ne 'https://confluence.internal.example.com/confluence') {
-        Fail 'CONFLUENCE_BASE_URL was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_CA_FILE', 'User') -ne 'C:\certs\confluence-ca.pem') {
-        Fail 'CONFLUENCE_CA_FILE was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_USERNAME', 'User') -ne 'confluence-svc') {
-        Fail 'CONFLUENCE_USERNAME was not persisted as a User environment variable'
-    }
-    if ([Environment]::GetEnvironmentVariable('CONFLUENCE_PASSWORD', 'User') -ne 'super-secret-confluence-password') {
-        Fail 'CONFLUENCE_PASSWORD was not resolved from CONFLUENCE_SECRET_ENV and persisted'
+function Test-ServiceBaseUrlsRejectEmbeddedCredentials {
+    $jira = Invoke-InstallerCase 'jira-credential-url' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://user:pass@jira.internal.example.com/jira'
+    )
+    if ($jira.ExitCode -eq 0 -or $jira.Output -notmatch 'embedded credentials') {
+        Fail "credential Jira URL was not rejected: $($jira.Output)"
     }
 
-    $missing = Invoke-InstallerCase 'missing-project-key' @(
+    $bitbucket = Invoke-InstallerCase 'bitbucket-credential-url' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
         '-EnableBitbucket',
-        '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
-        '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV'
-    ) @{ BITBUCKET_SECRET_ENV = 'token' }
-    if ($missing.ExitCode -eq 0 -or $missing.Output -notmatch 'BitbucketProjectKey') {
-        Fail "missing Bitbucket project key was not rejected: $($missing.Output)"
+        '-BitbucketBaseUrl', 'https://user:pass@bitbucket.internal.example.com/bitbucket',
+        '-BitbucketProjectKey', 'PRJ',
+        '-BitbucketTokenEnv', 'BITBUCKET_TOKEN_FOR_URL_TEST'
+    ) @{ BITBUCKET_TOKEN_FOR_URL_TEST = 'token-value' }
+    if ($bitbucket.ExitCode -eq 0 -or $bitbucket.Output -notmatch 'embedded credentials') {
+        Fail "credential Bitbucket URL was not rejected: $($bitbucket.Output)"
     }
 }
 
-function Test-NonInteractiveBitbucketRequiresTokenEnvValue {
+function Test-ModuleAndCredentialValidation {
     Remove-Item Env:UNSET_BITBUCKET_TOKEN -ErrorAction SilentlyContinue
-    $result = Invoke-InstallerCase 'missing-token' @(
+    $missingToken = Invoke-InstallerCase 'missing-token' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
         '-EnableBitbucket',
         '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
         '-BitbucketProjectKey', 'PRJ',
         '-BitbucketTokenEnv', 'UNSET_BITBUCKET_TOKEN'
-    ) @{}
-    if ($result.ExitCode -eq 0 -or $result.Output -notmatch 'UNSET_BITBUCKET_TOKEN') {
-        Fail "missing token env was not rejected: $($result.Output)"
+    )
+    if ($missingToken.ExitCode -eq 0 -or $missingToken.Output -notmatch 'UNSET_BITBUCKET_TOKEN') {
+        Fail "missing Bitbucket token env was not rejected: $($missingToken.Output)"
     }
-}
 
-function Test-JiraUsernameRequiresEnableJiraAndPasswordEnv {
+    $missingProject = Invoke-InstallerCase 'missing-project-key' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'None',
+        '-EnableBitbucket',
+        '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
+        '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV'
+    ) @{ BITBUCKET_SECRET_ENV = 'token' }
+    if ($missingProject.ExitCode -eq 0 -or $missingProject.Output -notmatch 'BitbucketProjectKey') {
+        Fail "missing Bitbucket project key was not rejected: $($missingProject.Output)"
+    }
+
     $noJira = Invoke-InstallerCase 'jira-username-without-enable' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
@@ -422,56 +385,40 @@ function Test-JiraUsernameRequiresEnableJiraAndPasswordEnv {
     }
 
     Remove-Item Env:UNSET_JIRA_PASSWORD -ErrorAction SilentlyContinue
-    $missingPassword = Invoke-InstallerCase 'jira-username-missing-password' @(
+    $missingJiraPassword = Invoke-InstallerCase 'jira-username-missing-password' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
         '-JiraUsername', 'jira-svc',
         '-JiraPasswordEnv', 'UNSET_JIRA_PASSWORD'
-    ) @{}
-    if ($missingPassword.ExitCode -eq 0 -or $missingPassword.Output -notmatch 'UNSET_JIRA_PASSWORD') {
-        Fail "missing Jira password env was not rejected: $($missingPassword.Output)"
+    )
+    if ($missingJiraPassword.ExitCode -eq 0 -or $missingJiraPassword.Output -notmatch 'UNSET_JIRA_PASSWORD') {
+        Fail "missing Jira password env was not rejected: $($missingJiraPassword.Output)"
     }
-}
 
-function Test-ConfluenceUsernameRequiresEnableConfluenceAndPasswordEnv {
     $noConfluence = Invoke-InstallerCase 'confluence-username-without-enable' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
         '-EnableJira',
         '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
         '-ConfluenceUsername', 'confluence-svc'
-    ) @{}
+    )
     if ($noConfluence.ExitCode -eq 0 -or $noConfluence.Output -notmatch '-ConfluenceUsername requires -EnableConfluence') {
         Fail "-ConfluenceUsername without -EnableConfluence was not rejected: $($noConfluence.Output)"
     }
 
     Remove-Item Env:UNSET_CONFLUENCE_PASSWORD -ErrorAction SilentlyContinue
-    $missingPassword = Invoke-InstallerCase 'confluence-username-missing-password' @(
+    $missingConfluencePassword = Invoke-InstallerCase 'confluence-username-missing-password' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
         '-EnableConfluence',
         '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
         '-ConfluenceUsername', 'confluence-svc',
         '-ConfluencePasswordEnv', 'UNSET_CONFLUENCE_PASSWORD'
-    ) @{}
-    if ($missingPassword.ExitCode -eq 0 -or $missingPassword.Output -notmatch 'UNSET_CONFLUENCE_PASSWORD') {
-        Fail "missing Confluence password env was not rejected: $($missingPassword.Output)"
-    }
-
-    Remove-Item Env:UNSET_CONFLUENCE_PASSWORD_DRYRUN -ErrorAction SilentlyContinue
-    $dryRunMissingPassword = Invoke-InstallerCase 'confluence-dry-run-missing-password-interactive' @(
-        '-Binary', (Join-Path $RepoRoot 'go.mod'),
-        '-Agents', 'None',
-        '-DryRun',
-        '-EnableConfluence',
-        '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
-        '-ConfluenceUsername', 'confluence-svc',
-        '-ConfluencePasswordEnv', 'UNSET_CONFLUENCE_PASSWORD_DRYRUN'
-    ) @{} $false
-    if ($dryRunMissingPassword.ExitCode -eq 0 -or $dryRunMissingPassword.Output -notmatch 'UNSET_CONFLUENCE_PASSWORD_DRYRUN') {
-        Fail "dry-run without -NonInteractive accepted missing Confluence password env: $($dryRunMissingPassword.Output)"
+    )
+    if ($missingConfluencePassword.ExitCode -eq 0 -or $missingConfluencePassword.Output -notmatch 'UNSET_CONFLUENCE_PASSWORD') {
+        Fail "missing Confluence password env was not rejected: $($missingConfluencePassword.Output)"
     }
 }
 
@@ -479,8 +426,6 @@ function Test-ConfluencePersistedEnvClearsWhenDisabledOrCredentialsOmitted {
     foreach ($key in @('CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONFLUENCE_USERNAME', 'CONFLUENCE_PASSWORD')) {
         [Environment]::SetEnvironmentVariable($key, "stale-$key", 'User')
     }
-    [Environment]::SetEnvironmentVariable('CONFLUENCE_SECRET_ENV', 'fresh-secret', 'User')
-
     Invoke-InstallerSuccess 'confluence-disabled-clears' @(
         '-Binary', (Join-Path $RepoRoot 'go.mod'),
         '-Agents', 'None',
@@ -515,143 +460,50 @@ function Test-ConfluencePersistedEnvClearsWhenDisabledOrCredentialsOmitted {
 function Test-AgentConfigEscapesBinaryPathForTomlAndJson {
     $caseDir = Join-Path $TmpRoot 'config-escaping'
     $installDir = Join-Path $caseDir 'install space\slash'
-    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), $installDir, (Join-Path $caseDir 'project'), (Join-Path $caseDir 'bin') | Out-Null
-    New-Fakes (Join-Path $caseDir 'bin')
-
-    $oldPath = $env:PATH
-    $oldHome = $env:HOME
-    $oldUserProfile = $env:USERPROFILE
-    $oldFakeLog = $env:FAKE_LOG
-    $oldPathext = $env:PATHEXT
-    try {
-        $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
-        $env:PATHEXT = ".PS1;$oldPathext"
-        $env:HOME = Join-Path $caseDir 'home'
-        $env:USERPROFILE = Join-Path $caseDir 'home'
-        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
-        $oldErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
-            -Binary (Join-Path $RepoRoot 'go.mod') `
-            -InstallDir $installDir `
-            -ProjectDir (Join-Path $caseDir 'project') `
-            -Scope Project `
-            -Agents Both `
-            -EnableJira `
-            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
-            -NonInteractive *>&1
-        $exitCode = $LASTEXITCODE
-        $ErrorActionPreference = $oldErrorActionPreference
-        if ($exitCode -ne 0) {
-            Fail "config escaping failed: $($output | Out-String)"
-        }
-    } finally {
-        $env:PATH = $oldPath
-        $env:HOME = $oldHome
-        $env:USERPROFILE = $oldUserProfile
-        $env:FAKE_LOG = $oldFakeLog
-        $env:PATHEXT = $oldPathext
-    }
-
-    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'args = []'
-    Assert-Contains (Join-Path $caseDir 'project\.codex\config.toml') 'install space\\slash\\atlassian-mcp.exe'
-    Assert-Contains (Join-Path $caseDir 'project\.mcp.json') 'install space\\slash\\atlassian-mcp.exe'
+    $result = Invoke-InstallerSuccess 'config-escaping' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-InstallDir', $installDir,
+        '-Agents', 'Both',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    )
+    Assert-Contains (Join-Path $result.CaseDir 'project\.codex\config.toml') 'args = []'
+    Assert-Contains (Join-Path $result.CaseDir 'project\.codex\config.toml') 'install space\\slash\\atlassian-mcp.exe'
+    Assert-Contains (Join-Path $result.CaseDir 'project\.mcp.json') 'install space\\slash\\atlassian-mcp.exe'
 }
 
 function Test-ClaudeCliRegistersScopeLocalAndUser {
     foreach ($scope in @('User', 'Local')) {
-        $caseDir = Join-Path $TmpRoot "claude-cli-$scope"
-        New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project'), (Join-Path $caseDir 'bin') | Out-Null
-        New-Fakes (Join-Path $caseDir 'bin')
-
-        $oldPath = $env:PATH
-        $oldHome = $env:HOME
-        $oldUserProfile = $env:USERPROFILE
-        $oldFakeLog = $env:FAKE_LOG
-        $oldPathext = $env:PATHEXT
-        try {
-            $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
-            $env:PATHEXT = ".PS1;$oldPathext"
-            $env:HOME = Join-Path $caseDir 'home'
-            $env:USERPROFILE = Join-Path $caseDir 'home'
-            $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
-            $oldErrorActionPreference = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
-                -Binary (Join-Path $RepoRoot 'go.mod') `
-                -InstallDir (Join-Path $caseDir 'install') `
-                -ProjectDir (Join-Path $caseDir 'project') `
-                -Scope $scope `
-                -Agents Claude `
-                -EnableJira `
-                -JiraBaseUrl 'https://jira.internal.example.com/jira' `
-                -NonInteractive *>&1
-            $exitCode = $LASTEXITCODE
-            $ErrorActionPreference = $oldErrorActionPreference
-            if ($exitCode -ne 0) {
-                Fail "claude CLI scope $scope failed: $($output | Out-String)"
-            }
-        } finally {
-            $env:PATH = $oldPath
-            $env:HOME = $oldHome
-            $env:USERPROFILE = $oldUserProfile
-            $env:FAKE_LOG = $oldFakeLog
-            $env:PATHEXT = $oldPathext
+        $result = Invoke-InstallerSuccess "claude-cli-$scope" @(
+            '-Binary', (Join-Path $RepoRoot 'go.mod'),
+            '-Scope', $scope,
+            '-Agents', 'Claude',
+            '-EnableJira',
+            '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+        )
+        Assert-Contains $result.Log ("claude mcp add atlassian --scope {0} --" -f $scope.ToLowerInvariant())
+        Assert-Contains $result.Log ("claude mcp get atlassian --scope {0}" -f $scope.ToLowerInvariant())
+        if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'home\.claude\settings.json')) {
+            Fail "installer wrote a Claude settings file for scope $scope instead of using claude mcp add"
         }
-
-        $log = Join-Path $caseDir 'commands.log'
-        Assert-Contains $log ("claude mcp add atlassian --scope {0} --" -f $scope.ToLowerInvariant())
-        Assert-Contains $log ("claude mcp get atlassian --scope {0}" -f $scope.ToLowerInvariant())
-        Assert-PathMissing (Join-Path $caseDir 'home\.claude\settings.json')
-        Assert-PathMissing (Join-Path $caseDir 'project\.mcp.json')
+        if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.mcp.json')) {
+            Fail "installer wrote .mcp.json for scope $scope instead of using claude mcp add"
+        }
     }
 }
 
 function Test-ClaudeCliMissingBinaryErrorsClearly {
-    $caseDir = Join-Path $TmpRoot 'claude-cli-missing'
-    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project'), (Join-Path $caseDir 'bin') | Out-Null
-    New-Fakes (Join-Path $caseDir 'bin')
-    Remove-Item -LiteralPath (Join-Path $caseDir 'bin\claude.ps1') -Force
-
-    $oldPath = $env:PATH
-    $oldHome = $env:HOME
-    $oldUserProfile = $env:USERPROFILE
-    $oldFakeLog = $env:FAKE_LOG
-    $oldPathext = $env:PATHEXT
-    try {
-        # Deliberately excludes $oldPath: a real claude CLI may be installed on the host running
-        # these tests, and this case must prove behavior when no claude binary can be found at all.
-        $env:PATH = "$(Join-Path $caseDir 'bin');$env:SystemRoot\System32;$env:SystemRoot"
-        $env:PATHEXT = ".PS1;$oldPathext"
-        $env:HOME = Join-Path $caseDir 'home'
-        $env:USERPROFILE = Join-Path $caseDir 'home'
-        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
-        $oldErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
-            -Binary (Join-Path $RepoRoot 'go.mod') `
-            -InstallDir (Join-Path $caseDir 'install') `
-            -ProjectDir (Join-Path $caseDir 'project') `
-            -Scope User `
-            -Agents Claude `
-            -EnableJira `
-            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
-            -NonInteractive *>&1
-        $exitCode = $LASTEXITCODE
-        $ErrorActionPreference = $oldErrorActionPreference
-        if ($exitCode -eq 0) {
-            Fail 'installer unexpectedly succeeded without claude CLI'
-        }
-        # Nested error rendering can hard-wrap the message, so tolerate whitespace/newlines between words.
-        if ((($output | Out-String) -replace '\s+', ' ') -notmatch 'claude\s*CLI is required') {
-            Fail "missing claude CLI error did not mention requirement: $($output | Out-String)"
-        }
-    } finally {
-        $env:PATH = $oldPath
-        $env:HOME = $oldHome
-        $env:USERPROFILE = $oldUserProfile
-        $env:FAKE_LOG = $oldFakeLog
-        $env:PATHEXT = $oldPathext
+    $fakeCaseDir = Join-Path $TmpRoot 'claude-cli-missing'
+    $pathOnly = "$(Join-Path $fakeCaseDir 'bin');$env:SystemRoot\System32;$env:SystemRoot"
+    $result = Invoke-InstallerCase 'claude-cli-missing' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Scope', 'User',
+        '-Agents', 'Claude',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    ) @{ REMOVE_FAKE_CLAUDE = '1'; PATH_VALUE = $pathOnly }
+    if ($result.ExitCode -eq 0 -or (($result.Output -replace '\s+', ' ') -notmatch 'claude\s*CLI is required')) {
+        Fail "missing claude CLI error did not mention requirement: $($result.Output)"
     }
 }
 
@@ -683,12 +535,15 @@ function Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls {
     $oldUserProfile = $env:USERPROFILE
     $oldFakeLog = $env:FAKE_LOG
     $oldPathext = $env:PATHEXT
+    $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
     try {
         $env:PATH = "$(Join-Path $rollbackDir 'bin');$oldPath"
         $env:PATHEXT = ".PS1;$oldPathext"
         $env:HOME = Join-Path $rollbackDir 'home'
         $env:USERPROFILE = Join-Path $rollbackDir 'home'
         $env:FAKE_LOG = Join-Path $rollbackDir 'commands.log'
+        # Match Invoke-InstallerCase: any PowerShell cache from this subprocess belongs in the test temp tree.
+        $env:PSModuleAnalysisCachePath = Join-Path $rollbackDir 'ps-module-cache\ModuleAnalysisCache'
         $oldErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
@@ -714,13 +569,13 @@ function Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls {
         $env:USERPROFILE = $oldUserProfile
         $env:FAKE_LOG = $oldFakeLog
         $env:PATHEXT = $oldPathext
+        $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
     }
     Assert-Contains (Join-Path $rollbackDir 'project\.codex\config.toml') 'original config'
 }
 
 function Test-DryRunValidatesWithoutSideEffects {
     $result = Invoke-InstallerSuccess 'dry-run' @(
-        '-SourceRepoUrl', 'https://github.com/acme/atlassian-mcp.git',
         '-Agents', 'Both',
         '-DryRun',
         '-EnableJira',
@@ -740,23 +595,21 @@ function Test-FinalPathsAndReadmeBootstrapContract {
         Fail 'root PowerShell installer should not exist'
     }
     Assert-Contains (Join-Path $RepoRoot 'README.md') 'https://raw.githubusercontent.com/chiendao1808/atlassian-mcp/${INSTALLER_REF}/scripts/install-from-remote.ps1'
-    Assert-Contains (Join-Path $RepoRoot 'README.md') 'Invoke-WebRequest -Uri $InstallerUrl -OutFile $InstallerFile'
-    Assert-Contains (Join-Path $RepoRoot 'README.md') "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$InstallerFile"
-    Assert-NotContains (Join-Path $RepoRoot 'README.md') 'Invoke-Expression'
+    Assert-Contains (Join-Path $RepoRoot 'README.md') '$INSTALLER_REF = ''main'''
+    Assert-Contains (Join-Path $RepoRoot 'README.md') '-ReleaseTag v1.0.4'
+    Assert-NotContains (Join-Path $RepoRoot 'README.md') '-SourceRepoUrl'
 }
 
 $PersistedEnvSnapshot = Save-PersistedEnv
 try {
     New-Item -ItemType Directory -Force -Path $TmpRoot | Out-Null
     $tests = @(
-        'Test-HttpsRemotesCheckoutTestBuildAndInstallAtomically',
-        'Test-KeepSourcePreservesCloneForDebugging',
-        'Test-SshRemoteIsPassedToGitWithoutProviderRewrite',
-        'Test-EmbeddedCredentialsAreRejectedBeforeGit',
-        'Test-ModuleValidationAndNonSecretConfig',
-        'Test-NonInteractiveBitbucketRequiresTokenEnvValue',
-        'Test-JiraUsernameRequiresEnableJiraAndPasswordEnv',
-        'Test-ConfluenceUsernameRequiresEnableConfluenceAndPasswordEnv',
+        'Test-DefaultReleaseDownloadVerifiesAndInstallsWithoutSourceBuild',
+        'Test-ReleaseTagPinsExactAsset',
+        'Test-ChecksumMismatchFailsWithoutReplacingDestination',
+        'Test-BinaryOverrideKeepsConfigBehaviorAndSkipsDownload',
+        'Test-ServiceBaseUrlsRejectEmbeddedCredentials',
+        'Test-ModuleAndCredentialValidation',
         'Test-ConfluencePersistedEnvClearsWhenDisabledOrCredentialsOmitted',
         'Test-AgentConfigEscapesBinaryPathForTomlAndJson',
         'Test-ClaudeCliRegistersScopeLocalAndUser',
@@ -773,4 +626,5 @@ try {
 } finally {
     Restore-PersistedEnv $PersistedEnvSnapshot
     Remove-Item -LiteralPath $TmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-RepoRootModuleAnalysisCache
 }

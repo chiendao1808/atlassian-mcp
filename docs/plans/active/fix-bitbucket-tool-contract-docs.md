@@ -1028,7 +1028,14 @@ local completion):
 
 - The `user.name` identity value for `bitbucket_set_pull_request_review_status`
   (guide §4 line 551) — currently ships `s.userSlug`; must be confirmed against
-  the target Bitbucket Server 5.10.2 host.
+  the target Bitbucket Server 5.10.2 host. Confirmation procedure:
+  1. Create a disposable PR; add the service user as participant.
+  2. Call `bitbucket_set_pull_request_review_status` with status `APPROVED`.
+  3. If 201 + participant approved → slug works for both URL and body; done.
+  4. If 400/409/error → slug ≠ username; add `BITBUCKET_USER_NAME` config,
+     use it for body `user.name` while keeping `BITBUCKET_USER_SLUG` for URL
+     path. Affected files: `config.go`, `service.go` (NewService),
+     `pull_requests.go` (SetPullRequestReviewStatus body).
 - 409 exception-name sub-classification for `bitbucket_commit_file`
   (guide §4 line 552) — mapping code is already SPECS-compliant
   (`BITBUCKET_COMMIT_FILE_CONFLICT` with sanitized detail); only the

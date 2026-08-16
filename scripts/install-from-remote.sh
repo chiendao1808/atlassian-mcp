@@ -396,22 +396,40 @@ merge_mcp_json() {
   printf '%s' "$existing" | jq --argjson entry "$entry" '.mcpServers = ((.mcpServers // {}) + {atlassian: $entry})'
 }
 
-# Builds the Cursor MCP server entry and merges it into the Cursor config. Command is the wrapper:
-# it already carries the non-secret runtime config and resolves credential env indirection at
-# runtime, so no resolved secret values are written into Cursor's JSON.
-configure_cursor() {
-  local command="$1"
-  local entry merged rc content
-  entry="$(jq -cn --arg command "$command" '{type: "stdio", command: $command, args: []}')" || return 1
-  merged="$(merge_mcp_json "$cursor_config" "$entry")" && rc=0 || rc=$?
+# Merges a prebuilt server entry into a JSON-backed agent config and writes the result through the
+# atomic-write/backup mechanism. A no-op when the existing entry is already identical.
+configure_json_agent() {
+  local path="$1"
+  local entry="$2"
+  local merged rc content
+  merged="$(merge_mcp_json "$path" "$entry")" && rc=0 || rc=$?
   if [[ "$rc" -eq 2 ]]; then
     return 0
   fi
   [[ "$rc" -eq 0 ]] || return 1
   content="$(mktemp)"
   printf '%s\n' "$merged" >"$content"
-  write_file_atomically "$content" "$cursor_config" yes || return 1
+  write_file_atomically "$content" "$path" yes || return 1
   rm -f "$content"
+}
+
+# Builds the Cursor MCP server entry and merges it into the Cursor config. Command is the wrapper:
+# it already carries the non-secret runtime config and resolves credential env indirection at
+# runtime, so no resolved secret values are written into Cursor's JSON.
+configure_cursor() {
+  local command="$1"
+  local entry
+  entry="$(jq -cn --arg command "$command" '{type: "stdio", command: $command, args: []}')" || return 1
+  configure_json_agent "$cursor_config" "$entry"
+}
+
+# Builds the Kiro MCP server entry and merges it into the Kiro config. Same command policy as
+# Cursor; autoApprove is deliberately not set so Kiro keeps its default per-tool approval.
+configure_kiro() {
+  local command="$1"
+  local entry
+  entry="$(jq -cn --arg command "$command" '{command: $command, args: [], disabled: false}')" || return 1
+  configure_json_agent "$kiro_config" "$entry"
 }
 
 # Ensures the Claude Code CLI is present before it is used to register the atlassian MCP server.
@@ -434,22 +452,25 @@ configure_claude_cli() {
     echo "warning: could not verify atlassian MCP registration via claude mcp get" >&2
 }
 
-# Resolves user, local, and project config targets for the selected coding agents. Cursor uses the
-# same project/workspace file for both local and project scope.
+# Resolves user, local, and project config targets for the selected coding agents. Cursor and
+# Kiro use the same project/workspace file for both local and project scope.
 config_paths() {
   case "$scope" in
     user)
       codex_config="$HOME/.codex/config.toml"
       cursor_config="$HOME/.cursor/mcp.json"
+      kiro_config="$HOME/.kiro/settings/mcp.json"
       ;;
     local)
       codex_config="$project_dir/.codex/config.toml"
       cursor_config="$project_dir/.cursor/mcp.json"
+      kiro_config="$project_dir/.kiro/settings/mcp.json"
       ;;
     project)
       codex_config="$project_dir/.codex/config.toml"
       claude_config="$project_dir/.mcp.json"
       cursor_config="$project_dir/.cursor/mcp.json"
+      kiro_config="$project_dir/.kiro/settings/mcp.json"
       ;;
     *) die "--scope must be local, project, or user" ;;
   esac
@@ -484,6 +505,9 @@ configure_agents() {
   fi
   if [[ "$select_cursor" == "yes" ]]; then
     configure_cursor "$command" || return 1
+  fi
+  if [[ "$select_kiro" == "yes" ]]; then
+    configure_kiro "$command" || return 1
   fi
 }
 

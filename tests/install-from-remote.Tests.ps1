@@ -830,6 +830,160 @@ function Test-CursorRejectsMalformedExistingConfig {
     }
 }
 
+function Test-KiroConfigPathsAndScopeMapping {
+    foreach ($scope in @('User', 'Local', 'Project')) {
+        $caseName = 'kiro-scope-' + $scope
+        $result = Invoke-InstallerSuccess $caseName @(
+            '-Binary', (Join-Path $RepoRoot 'go.mod'),
+            '-Agents', 'Kiro',
+            '-Scope', $scope,
+            '-EnableJira',
+            '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+        )
+        if ($scope -eq 'User') {
+            Assert-File (Join-Path $result.CaseDir 'home\.kiro\settings\mcp.json')
+            if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.kiro')) { Fail 'kiro user scope wrote project config' }
+        } else {
+            Assert-File (Join-Path $result.CaseDir 'project\.kiro\settings\mcp.json')
+            if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'home\.kiro')) { Fail "kiro $scope scope wrote home config" }
+        }
+    }
+}
+
+function Test-KiroMergePreservesExistingJson {
+    $caseDir = Join-Path $TmpRoot 'kiro-merge'
+    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project\.kiro\settings') | Out-Null
+    New-Fakes (Join-Path $caseDir 'bin')
+    @'
+{
+  "mcpServers": {
+    "another-server": {
+      "command": "existing"
+    }
+  },
+  "customSetting": true
+}
+'@ | Set-Content -LiteralPath (Join-Path $caseDir 'project\.kiro\settings\mcp.json') -Encoding ASCII
+
+    $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+    try {
+        $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $caseDir 'home'
+        $env:USERPROFILE = Join-Path $caseDir 'home'
+        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $env:PSModuleAnalysisCachePath = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents Kiro `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($exitCode -ne 0) { Fail "kiro merge unexpectedly failed: $($output | Out-String)" }
+    } finally {
+        $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+    }
+
+    $cfg = Join-Path $caseDir 'project\.kiro\settings\mcp.json'
+    $doc = ConvertFrom-Json (Get-Content -LiteralPath $cfg -Raw)
+    if ($doc.mcpServers.'another-server'.command -ne 'existing') { Fail 'another-server entry changed' }
+    if ($doc.customSetting -ne $true) { Fail 'unrelated root key changed' }
+    if ($doc.mcpServers.atlassian.disabled -ne $false) { Fail 'kiro disabled is not false' }
+    if (@($doc.mcpServers.atlassian.args).Count -ne 0) { Fail 'kiro args is not an empty array' }
+    if ($doc.mcpServers.atlassian.command -notmatch 'atlassian-mcp\.exe$') { Fail 'kiro command does not point at the exe' }
+    if ($null -ne $doc.mcpServers.atlassian.PSObject.Properties['autoApprove']) { Fail 'kiro entry must not set autoApprove' }
+}
+
+function Test-KiroConflictReplaceAndIdempotency {
+    $caseDir = Join-Path $TmpRoot 'kiro-conflict'
+    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project\.kiro\settings') | Out-Null
+    New-Fakes (Join-Path $caseDir 'bin')
+    @'
+{
+  "mcpServers": {
+    "atlassian": {
+      "command": "C:\\somewhere\\else.exe",
+      "args": [],
+      "disabled": true
+    }
+  },
+  "customSetting": true
+}
+'@ | Set-Content -LiteralPath (Join-Path $caseDir 'project\.kiro\settings\mcp.json') -Encoding ASCII
+
+    $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+    try {
+        $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $caseDir 'home'
+        $env:USERPROFILE = Join-Path $caseDir 'home'
+        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $env:PSModuleAnalysisCachePath = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $conflictOutput = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents Kiro `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $conflictExit = $LASTEXITCODE
+        if ($conflictExit -eq 0) { Fail 'kiro conflict without -Replace unexpectedly succeeded' }
+        if (($conflictOutput | Out-String) -notmatch 'use -Replace') { Fail "kiro conflict message missing -Replace hint: $($conflictOutput | Out-String)" }
+        Assert-Contains (Join-Path $caseDir 'project\.kiro\settings\mcp.json') 'somewhere'
+
+        $replaceOutput = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents Kiro `
+            -Replace `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $replaceExit = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($replaceExit -ne 0) { Fail "kiro replace unexpectedly failed: $($replaceOutput | Out-String)" }
+    } finally {
+        $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+    }
+
+    $cfg = Join-Path $caseDir 'project\.kiro\settings\mcp.json'
+    Assert-NotContains $cfg 'somewhere'
+    $doc = ConvertFrom-Json (Get-Content -LiteralPath $cfg -Raw)
+    if ($doc.customSetting -ne $true) { Fail 'replace dropped unrelated root key' }
+    if ($doc.mcpServers.atlassian.disabled -ne $false) { Fail 'replace did not reset disabled to false' }
+}
+
+function Test-KiroOnlyInstallDoesNotTouchOtherAgents {
+    $result = Invoke-InstallerSuccess 'kiro-only' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'Kiro',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    )
+    Assert-File (Join-Path $result.CaseDir 'project\.kiro\settings\mcp.json')
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.cursor')) { Fail 'kiro-only install created Cursor config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.codex')) { Fail 'kiro-only install created Codex config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.mcp.json')) { Fail 'kiro-only install created Claude config' }
+    Assert-NotContains $result.Log 'claude mcp'
+}
+
 function Test-FinalPathsAndReadmeBootstrapContract {
     Assert-File $Installer
     if (Test-Path -LiteralPath (Join-Path $RepoRoot 'install-from-remote.ps1')) {
@@ -861,6 +1015,10 @@ try {
         'Test-CursorMergePreservesExistingJson',
         'Test-CursorConflictReplaceAndIdempotency',
         'Test-CursorRejectsMalformedExistingConfig',
+        'Test-KiroConfigPathsAndScopeMapping',
+        'Test-KiroMergePreservesExistingJson',
+        'Test-KiroConflictReplaceAndIdempotency',
+        'Test-KiroOnlyInstallDoesNotTouchOtherAgents',
         'Test-FinalPathsAndReadmeBootstrapContract'
     )
     foreach ($test in $tests) {

@@ -446,6 +446,16 @@ function New-CursorServerEntry($Command) {
     }
 }
 
+# Builds the Kiro MCP server entry. Same command policy as Cursor; autoApprove is deliberately
+# omitted so Kiro keeps its default per-tool approval behavior.
+function New-KiroServerEntry($Command) {
+    return [pscustomobject][ordered]@{
+        command  = [string]$Command
+        args     = @()
+        disabled = $false
+    }
+}
+
 # Merges the atlassian entry into a JSON-backed agent config (Cursor/Kiro), preserving unrelated
 # root properties and unrelated mcpServers entries. Returns the merged JSON string, or $null when
 # the existing entry is already identical (idempotent no-op). Throws on malformed input or an
@@ -532,26 +542,29 @@ function Configure-ClaudeCli($Command) {
     }
 }
 
-# Resolves user, local, and project agent config paths for the selected scope. Cursor uses the
-# same project/workspace file for both Local and Project scope.
+# Resolves user, local, and project agent config paths for the selected scope. Cursor and Kiro
+# use the same project/workspace file for both Local and Project scope.
 function Get-ConfigPaths {
     $homeDir = Get-HomeDir
     if ($Scope -eq 'User') {
         return [pscustomobject]@{
             Codex  = Join-Path $homeDir '.codex\config.toml'
             Cursor = Join-Path $homeDir '.cursor\mcp.json'
+            Kiro   = Join-Path $homeDir '.kiro\settings\mcp.json'
         }
     }
     if ($Scope -eq 'Local') {
         return [pscustomobject]@{
             Codex  = Join-Path $ProjectDir '.codex\config.toml'
             Cursor = Join-Path $ProjectDir '.cursor\mcp.json'
+            Kiro   = Join-Path $ProjectDir '.kiro\settings\mcp.json'
         }
     }
     return [pscustomobject]@{
         Codex  = Join-Path $ProjectDir '.codex\config.toml'
         Claude = Join-Path $ProjectDir '.mcp.json'
         Cursor = Join-Path $ProjectDir '.cursor\mcp.json'
+        Kiro   = Join-Path $ProjectDir '.kiro\settings\mcp.json'
     }
 }
 
@@ -572,6 +585,12 @@ function Configure-Agents($Command, $EnvVars) {
         $merged = Merge-McpJson $paths.Cursor (New-CursorServerEntry $Command)
         if ($null -ne $merged) {
             Write-FileAtomically $merged $paths.Cursor $true
+        }
+    }
+    if ($Script:SelectKiro) {
+        $merged = Merge-McpJson $paths.Kiro (New-KiroServerEntry $Command)
+        if ($null -ne $merged) {
+            Write-FileAtomically $merged $paths.Kiro $true
         }
     }
 }

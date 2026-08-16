@@ -640,11 +640,12 @@ test_agent_selection_contract() {
           --non-interactive >/tmp/installer-sel-valid.out 2>&1 ||
         fail "--agents $valid unexpectedly failed: $(cat /tmp/installer-sel-valid.out)"
     done
-    # all selects Claude, Codex, and Cursor (Kiro assertions are added with its adapter).
+    # all selects all four agents.
     local all_dir="$TMP_ROOT/sel-valid-all"
     assert_file "$all_dir/project/.codex/config.toml"
     assert_file "$all_dir/project/.mcp.json"
     assert_file "$all_dir/project/.cursor/mcp.json"
+    assert_file "$all_dir/project/.kiro/settings/mcp.json"
 
     # claude,cursor selects Claude and Cursor but not Codex.
     local mixed_dir="$TMP_ROOT/sel-valid-claude,cursor"
@@ -887,6 +888,165 @@ test_cursor_command_escaping() {
   assert_contains "$dir/command.txt" "$install_dir/atlassian-mcp-run"
 }
 
+test_kiro_config_paths_and_scope_mapping() {
+  require_jq "kiro scope mapping" || return 0
+  local scope
+  for scope in user local project; do
+    local dir="$TMP_ROOT/kiro-scope-$scope"
+    mkdir -p "$dir/home" "$dir/install" "$dir/project"
+    make_fakes "$dir/bin"
+    cp "$JQ_BIN" "$dir/bin/jq"
+    chmod +x "$dir/bin/jq"
+    FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+      bash "$INSTALLER" \
+        --binary "$REPO_ROOT/go.mod" \
+        --install-dir "$dir/install" \
+        --project-dir "$dir/project" \
+        --scope "$scope" \
+        --agents kiro \
+        --enable-jira \
+        --jira-base-url https://jira.internal.example.com/jira \
+        --non-interactive >/tmp/installer-kiro-scope.out 2>&1 ||
+      fail "kiro --scope $scope unexpectedly failed: $(cat /tmp/installer-kiro-scope.out)"
+    case "$scope" in
+      user)
+        assert_file "$dir/home/.kiro/settings/mcp.json"
+        [[ ! -e "$dir/project/.kiro" ]] || fail "kiro user scope wrote project config"
+        ;;
+      *)
+        assert_file "$dir/project/.kiro/settings/mcp.json"
+        [[ ! -e "$dir/home/.kiro" ]] || fail "kiro --scope $scope wrote home config"
+        ;;
+    esac
+  done
+}
+
+test_kiro_merge_preserves_existing_json() {
+  require_jq "kiro merge preservation" || return 0
+  local dir="$TMP_ROOT/kiro-merge"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project/.kiro/settings"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  cat >"$dir/project/.kiro/settings/mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "another-server": {
+      "command": "existing"
+    }
+  },
+  "customSetting": true
+}
+JSON
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents kiro \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-kiro-merge.out 2>&1 ||
+    fail "kiro merge unexpectedly failed: $(cat /tmp/installer-kiro-merge.out)"
+  local cfg="$dir/project/.kiro/settings/mcp.json"
+  "$JQ_BIN" -e '.mcpServers["another-server"].command == "existing"' "$cfg" >/dev/null || fail "another-server entry changed"
+  "$JQ_BIN" -e '.customSetting == true' "$cfg" >/dev/null || fail "unrelated root key changed"
+  "$JQ_BIN" -e '.mcpServers.atlassian.disabled == false' "$cfg" >/dev/null || fail "kiro disabled is not false"
+  "$JQ_BIN" -e '.mcpServers.atlassian.args == []' "$cfg" >/dev/null || fail "kiro args is not an empty array"
+  "$JQ_BIN" -e '.mcpServers.atlassian.command | endswith("atlassian-mcp-run")' "$cfg" >/dev/null || fail "kiro command does not point at the wrapper"
+  "$JQ_BIN" -e '.mcpServers.atlassian | has("autoApprove") | not' "$cfg" >/dev/null || fail "kiro entry must not set autoApprove"
+  "$JQ_BIN" -e '.mcpServers.atlassian | has("type") | not' "$cfg" >/dev/null || fail "kiro entry must not set type"
+}
+
+test_kiro_conflict_replace_and_idempotency() {
+  require_jq "kiro conflict and idempotency" || return 0
+  local dir="$TMP_ROOT/kiro-conflict"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project/.kiro/settings"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  cat >"$dir/project/.kiro/settings/mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "atlassian": {
+      "command": "/somewhere/else",
+      "args": [],
+      "disabled": true
+    }
+  },
+  "customSetting": true
+}
+JSON
+  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents kiro \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-kiro-conflict.out 2>&1; then
+    fail "kiro conflict without --replace unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-kiro-conflict.out "use --replace"
+  assert_contains "$dir/project/.kiro/settings/mcp.json" "/somewhere/else"
+
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents kiro \
+      --replace \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-kiro-replace.out 2>&1 ||
+    fail "kiro replace unexpectedly failed: $(cat /tmp/installer-kiro-replace.out)"
+  assert_not_contains "$dir/project/.kiro/settings/mcp.json" "/somewhere/else"
+  "$JQ_BIN" -e '.customSetting == true' "$dir/project/.kiro/settings/mcp.json" >/dev/null || fail "replace dropped unrelated root key"
+
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents kiro \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-kiro-idem.out 2>&1 ||
+    fail "kiro reinstall unexpectedly failed: $(cat /tmp/installer-kiro-idem.out)"
+  assert_count "$dir/project/.kiro/settings/mcp.json" '"atlassian":' 1
+}
+
+test_kiro_only_install_does_not_touch_other_agents() {
+  require_jq "kiro isolation" || return 0
+  local dir="$TMP_ROOT/kiro-only"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents kiro \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-kiro-only.out 2>&1 ||
+    fail "kiro-only install unexpectedly failed: $(cat /tmp/installer-kiro-only.out)"
+  assert_file "$dir/project/.kiro/settings/mcp.json"
+  [[ ! -e "$dir/project/.cursor" ]] || fail "kiro-only install created Cursor config"
+  [[ ! -e "$dir/project/.codex" ]] || fail "kiro-only install created Codex config"
+  [[ ! -e "$dir/project/.mcp.json" ]] || fail "kiro-only install created Claude config"
+  assert_not_contains "$dir/commands.log" "claude mcp"
+}
+
 test_jq_required_only_for_cursor_or_kiro() {
   # Missing jq with cursor selected fails with a clear error before any install side effect.
   local dir="$TMP_ROOT/jq-missing-cursor"
@@ -957,6 +1117,10 @@ for test_name in \
   test_cursor_conflict_replace_and_idempotency \
   test_cursor_rejects_malformed_existing_config \
   test_cursor_command_escaping \
+  test_kiro_config_paths_and_scope_mapping \
+  test_kiro_merge_preserves_existing_json \
+  test_kiro_conflict_replace_and_idempotency \
+  test_kiro_only_install_does_not_touch_other_agents \
   test_jq_required_only_for_cursor_or_kiro \
   test_final_paths_and_readme_bootstrap_contract
 do

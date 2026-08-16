@@ -10,6 +10,19 @@ TMP_ROOT="$(mktemp -d)"
 
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# Resolves a jq binary for the Cursor/Kiro JSON-merge tests. CI (Ubuntu) ships jq on PATH; local
+# environments may point JQ_BIN at a static jq. When neither is available, jq-dependent cases are
+# skipped (not failed) so the suite still runs on hosts without jq.
+JQ_BIN="${JQ_BIN:-$(command -v jq || true)}"
+
+require_jq() {
+  if [[ -z "$JQ_BIN" ]]; then
+    echo "SKIP (no jq available): $1" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Minimal shell harness: run the real installer against fake network/tool boundaries.
 fail() {
   echo "FAIL: $*" >&2
@@ -115,6 +128,22 @@ FAKE_CLAUDE
   chmod +x "$dir/curl" "$dir/uname" "$dir/git" "$dir/go" "$dir/claude"
 }
 
+# Builds a bin directory containing the external fakes plus symlinks to the coreutils the
+# installer needs, but deliberately WITHOUT jq. Used to prove the jq requirement triggers only
+# for Cursor/Kiro. CI ships jq on PATH, so a jq-less PATH must be constructed explicitly.
+make_fakes_without_jq() {
+  local dir="$1"
+  make_fakes "$dir"
+  local tool src
+  for tool in bash sh cat cp mv rm mkdir chmod mktemp dirname basename grep awk sed sha256sum uname head tr cut sort env printf; do
+    src="$(command -v "$tool" 2>/dev/null || true)"
+    if [[ -n "$src" && "$tool" != "jq" && ! -e "$dir/$tool" ]]; then
+      ln -sf "$src" "$dir/$tool"
+    fi
+  done
+  rm -f "$dir/jq"
+}
+
 run_installer() {
   local name="$1"
   shift
@@ -124,6 +153,10 @@ run_installer() {
   mkdir -p "$case_dir/home" "$case_dir/install" "$case_dir/project"
   make_fakes "$fake_bin"
   make_release_fixture "$release_dir"
+  if [[ -n "$JQ_BIN" ]]; then
+    cp "$JQ_BIN" "$fake_bin/jq"
+    chmod +x "$fake_bin/jq"
+  fi
   FAKE_LOG="$case_dir/commands.log" \
   FAKE_RELEASE_DIR="$release_dir" \
   HOME="$case_dir/home" \
@@ -551,7 +584,8 @@ test_dry_run_validates_without_side_effects() {
 
 test_agent_selection_contract() {
   local valid
-  for valid in cursor kiro cursor,kiro claude,cursor claude,codex,cursor,kiro all both none cursor,cursor; do
+  # Selections that do not require jq run on every host.
+  for valid in both none claude codex claude,codex; do
     local dir="$TMP_ROOT/sel-valid-$valid"
     mkdir -p "$dir/home" "$dir/install" "$dir/project"
     make_fakes "$dir/bin"
@@ -575,20 +609,54 @@ test_agent_selection_contract() {
   [[ ! -e "$both_dir/project/.cursor" ]] || fail "both created Cursor config"
   [[ ! -e "$both_dir/project/.kiro" ]] || fail "both created Kiro config"
 
-  # all selects Claude + Codex today; Cursor/Kiro config assertions are added with their adapters.
-  local all_dir="$TMP_ROOT/sel-valid-all"
-  assert_file "$all_dir/project/.codex/config.toml"
-  assert_file "$all_dir/project/.mcp.json"
-
-  # claude,cursor selects Claude but not Codex.
-  local mixed_dir="$TMP_ROOT/sel-valid-claude,cursor"
-  assert_file "$mixed_dir/project/.mcp.json"
-  [[ ! -e "$mixed_dir/project/.codex/config.toml" ]] || fail "claude,cursor created Codex config"
+  # claude,codex selects Claude and Codex but not Cursor or Kiro.
+  local cc_dir="$TMP_ROOT/sel-valid-claude,codex"
+  assert_file "$cc_dir/project/.codex/config.toml"
+  assert_file "$cc_dir/project/.mcp.json"
+  [[ ! -e "$cc_dir/project/.cursor" ]] || fail "claude,codex created Cursor config"
 
   # none registers no agent config.
   local none_dir="$TMP_ROOT/sel-valid-none"
   [[ ! -e "$none_dir/project/.codex/config.toml" ]] || fail "none created Codex config"
   [[ ! -e "$none_dir/project/.mcp.json" ]] || fail "none created Claude config"
+
+  # Selections that include Cursor/Kiro require jq; skip them when jq is unavailable.
+  if require_jq "cursor/kiro selection cases"; then
+    for valid in cursor kiro cursor,kiro claude,cursor claude,codex,cursor,kiro all cursor,cursor; do
+      local dir="$TMP_ROOT/sel-valid-$valid"
+      mkdir -p "$dir/home" "$dir/install" "$dir/project"
+      make_fakes "$dir/bin"
+      cp "$JQ_BIN" "$dir/bin/jq"
+      chmod +x "$dir/bin/jq"
+      FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+        bash "$INSTALLER" \
+          --binary "$REPO_ROOT/go.mod" \
+          --install-dir "$dir/install" \
+          --project-dir "$dir/project" \
+          --scope project \
+          --agents "$valid" \
+          --enable-jira \
+          --jira-base-url https://jira.internal.example.com/jira \
+          --non-interactive >/tmp/installer-sel-valid.out 2>&1 ||
+        fail "--agents $valid unexpectedly failed: $(cat /tmp/installer-sel-valid.out)"
+    done
+    # all selects Claude, Codex, and Cursor (Kiro assertions are added with its adapter).
+    local all_dir="$TMP_ROOT/sel-valid-all"
+    assert_file "$all_dir/project/.codex/config.toml"
+    assert_file "$all_dir/project/.mcp.json"
+    assert_file "$all_dir/project/.cursor/mcp.json"
+
+    # claude,cursor selects Claude and Cursor but not Codex.
+    local mixed_dir="$TMP_ROOT/sel-valid-claude,cursor"
+    assert_file "$mixed_dir/project/.mcp.json"
+    assert_file "$mixed_dir/project/.cursor/mcp.json"
+    [[ ! -e "$mixed_dir/project/.codex/config.toml" ]] || fail "claude,cursor created Codex config"
+
+    # cursor,cursor deduplicates to a single Cursor registration.
+    local dup_dir="$TMP_ROOT/sel-valid-cursor,cursor"
+    assert_file "$dup_dir/project/.cursor/mcp.json"
+    assert_count "$dup_dir/project/.cursor/mcp.json" '"atlassian":' 1
+  fi
 
   local invalid
   for invalid in invalid none,cursor all,cursor both,kiro cursor, ""; do
@@ -625,6 +693,239 @@ test_agent_selection_contract() {
   assert_contains /tmp/installer-sel-msg.out "must be one of: claude, codex, cursor, kiro"
 }
 
+test_cursor_config_paths_and_scope_mapping() {
+  require_jq "cursor scope mapping" || return 0
+  local scope
+  for scope in user local project; do
+    local dir="$TMP_ROOT/cursor-scope-$scope"
+    mkdir -p "$dir/home" "$dir/install" "$dir/project"
+    make_fakes "$dir/bin"
+    cp "$JQ_BIN" "$dir/bin/jq"
+    chmod +x "$dir/bin/jq"
+    FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+      bash "$INSTALLER" \
+        --binary "$REPO_ROOT/go.mod" \
+        --install-dir "$dir/install" \
+        --project-dir "$dir/project" \
+        --scope "$scope" \
+        --agents cursor \
+        --enable-jira \
+        --jira-base-url https://jira.internal.example.com/jira \
+        --non-interactive >/tmp/installer-cursor-scope.out 2>&1 ||
+      fail "cursor --scope $scope unexpectedly failed: $(cat /tmp/installer-cursor-scope.out)"
+    case "$scope" in
+      user)
+        assert_file "$dir/home/.cursor/mcp.json"
+        [[ ! -e "$dir/project/.cursor" ]] || fail "cursor user scope wrote project config"
+        ;;
+      *)
+        assert_file "$dir/project/.cursor/mcp.json"
+        [[ ! -e "$dir/home/.cursor" ]] || fail "cursor --scope $scope wrote home config"
+        ;;
+    esac
+  done
+}
+
+test_cursor_merge_preserves_existing_json() {
+  require_jq "cursor merge preservation" || return 0
+  local dir="$TMP_ROOT/cursor-merge"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project/.cursor"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  cat >"$dir/project/.cursor/mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "existing": {
+      "command": "existing-server"
+    }
+  },
+  "customSetting": true
+}
+JSON
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-cursor-merge.out 2>&1 ||
+    fail "cursor merge unexpectedly failed: $(cat /tmp/installer-cursor-merge.out)"
+  local cfg="$dir/project/.cursor/mcp.json"
+  assert_contains "$cfg" '"existing"'
+  assert_contains "$cfg" '"customSetting"'
+  assert_contains "$cfg" '"atlassian"'
+  assert_contains "$cfg" '"type": "stdio"'
+  assert_contains "$cfg" 'atlassian-mcp-run'
+  "$JQ_BIN" -e '.mcpServers.atlassian.args == []' "$cfg" >/dev/null || fail "cursor args is not an empty array"
+  "$JQ_BIN" -e '.mcpServers.existing.command == "existing-server"' "$cfg" >/dev/null || fail "existing server entry changed"
+  "$JQ_BIN" -e '.customSetting == true' "$cfg" >/dev/null || fail "unrelated root key changed"
+}
+
+test_cursor_conflict_replace_and_idempotency() {
+  require_jq "cursor conflict and idempotency" || return 0
+  local dir="$TMP_ROOT/cursor-conflict"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project/.cursor"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  cat >"$dir/project/.cursor/mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "atlassian": {
+      "type": "stdio",
+      "command": "/somewhere/else",
+      "args": []
+    }
+  },
+  "customSetting": true
+}
+JSON
+  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-cursor-conflict.out 2>&1; then
+    fail "cursor conflict without --replace unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-cursor-conflict.out "use --replace"
+  assert_contains "$dir/project/.cursor/mcp.json" "/somewhere/else"
+
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --replace \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-cursor-replace.out 2>&1 ||
+    fail "cursor replace unexpectedly failed: $(cat /tmp/installer-cursor-replace.out)"
+  assert_not_contains "$dir/project/.cursor/mcp.json" "/somewhere/else"
+  assert_contains "$dir/project/.cursor/mcp.json" '"customSetting"'
+  "$JQ_BIN" -e '.customSetting == true' "$dir/project/.cursor/mcp.json" >/dev/null || fail "replace dropped unrelated root key"
+
+  # Re-running the identical install is idempotent and does not duplicate the entry.
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-cursor-idem.out 2>&1 ||
+    fail "cursor reinstall unexpectedly failed: $(cat /tmp/installer-cursor-idem.out)"
+  assert_count "$dir/project/.cursor/mcp.json" '"atlassian"' 1
+}
+
+test_cursor_rejects_malformed_existing_config() {
+  require_jq "cursor malformed config" || return 0
+  local case_name cfg
+  for case_name in malformed root-array servers-array directory; do
+    local dir="$TMP_ROOT/cursor-bad-$case_name"
+    mkdir -p "$dir/home" "$dir/install" "$dir/project/.cursor"
+    make_fakes "$dir/bin"
+    cp "$JQ_BIN" "$dir/bin/jq"
+    chmod +x "$dir/bin/jq"
+    cfg="$dir/project/.cursor/mcp.json"
+    case "$case_name" in
+      malformed) printf '{not json' >"$cfg" ;;
+      root-array) printf '[]' >"$cfg" ;;
+      servers-array) printf '{"mcpServers": []}' >"$cfg" ;;
+      directory) mkdir -p "$cfg" ;;
+    esac
+    if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+      bash "$INSTALLER" \
+        --binary "$REPO_ROOT/go.mod" \
+        --install-dir "$dir/install" \
+        --project-dir "$dir/project" \
+        --scope project \
+        --agents cursor \
+        --enable-jira \
+        --jira-base-url https://jira.internal.example.com/jira \
+        --non-interactive >/tmp/installer-cursor-bad.out 2>&1; then
+      fail "cursor with $case_name config unexpectedly succeeded"
+    fi
+  done
+}
+
+test_cursor_command_escaping() {
+  require_jq "cursor command escaping" || return 0
+  local dir="$TMP_ROOT/cursor-escaping"
+  local install_dir="$dir/install \"quote\" \\slash with space"
+  mkdir -p "$dir/home" "$install_dir" "$dir/project"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$install_dir" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-cursor-escaping.out 2>&1 ||
+    fail "cursor escaping install unexpectedly failed: $(cat /tmp/installer-cursor-escaping.out)"
+  local cfg="$dir/project/.cursor/mcp.json"
+  "$JQ_BIN" -e '.mcpServers.atlassian.command | endswith("atlassian-mcp-run")' "$cfg" >/dev/null ||
+    fail "cursor command does not point at the wrapper"
+  "$JQ_BIN" -r '.mcpServers.atlassian.command' "$cfg" >"$dir/command.txt"
+  assert_contains "$dir/command.txt" "$install_dir/atlassian-mcp-run"
+}
+
+test_jq_required_only_for_cursor_or_kiro() {
+  # Missing jq with cursor selected fails with a clear error before any install side effect.
+  local dir="$TMP_ROOT/jq-missing-cursor"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes_without_jq "$dir/bin"
+  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-jq-missing.out 2>&1; then
+    fail "cursor without jq unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-jq-missing.out "jq is required"
+  [[ ! -e "$dir/install/atlassian-mcp" ]] || fail "missing jq still installed the binary"
+
+  # Claude/Codex-only selections must not require jq even when it is absent.
+  local ok_dir="$TMP_ROOT/jq-missing-claude-codex"
+  mkdir -p "$ok_dir/home" "$ok_dir/install" "$ok_dir/project"
+  make_fakes_without_jq "$ok_dir/bin"
+  FAKE_LOG="$ok_dir/commands.log" HOME="$ok_dir/home" PATH="$ok_dir/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$ok_dir/install" \
+      --project-dir "$ok_dir/project" \
+      --scope project \
+      --agents both \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-jq-ok.out 2>&1 ||
+    fail "both without jq unexpectedly failed: $(cat /tmp/installer-jq-ok.out)"
+  assert_file "$ok_dir/project/.codex/config.toml"
+  assert_file "$ok_dir/project/.mcp.json"
+}
+
 test_final_paths_and_readme_bootstrap_contract() {
   assert_file "$REPO_ROOT/scripts/install-from-remote.sh"
   [[ ! -e "$REPO_ROOT/install-from-remote.sh" ]] || fail "root bash installer should not exist"
@@ -651,6 +952,12 @@ for test_name in \
   test_rerun_is_idempotent_and_config_failure_rolls_back \
   test_dry_run_validates_without_side_effects \
   test_agent_selection_contract \
+  test_cursor_config_paths_and_scope_mapping \
+  test_cursor_merge_preserves_existing_json \
+  test_cursor_conflict_replace_and_idempotency \
+  test_cursor_rejects_malformed_existing_config \
+  test_cursor_command_escaping \
+  test_jq_required_only_for_cursor_or_kiro \
   test_final_paths_and_readme_bootstrap_contract
 do
   "$test_name"

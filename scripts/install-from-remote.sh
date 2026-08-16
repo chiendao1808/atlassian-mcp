@@ -364,6 +364,56 @@ JSON
   echo "$body"
 }
 
+# Merges the atlassian entry into a JSON-backed agent config (Cursor/Kiro), preserving unrelated
+# root keys and unrelated mcpServers entries. Prints the merged JSON on stdout. Exits the
+# subshell with 1 (via die) on malformed input or an unaccepted conflict; returns 2 when the
+# existing entry is already identical, which callers treat as an idempotent no-op.
+merge_mcp_json() {
+  local path="$1"
+  local entry="$2"
+  local existing
+  [[ -d "$path" ]] && die "refusing to replace directory config at $path"
+  if [[ -f "$path" ]]; then
+    existing="$(cat "$path")"
+    # A whitespace-only file carries no content to preserve; treat it like a missing config.
+    if [[ -z "${existing//[[:space:]]/}" ]]; then
+      existing="{}"
+    else
+      printf '%s' "$existing" | jq -e . >/dev/null 2>&1 || die "existing config at $path is not valid JSON"
+    fi
+  else
+    existing="{}"
+  fi
+  printf '%s' "$existing" | jq -e 'type == "object"' >/dev/null 2>&1 || die "existing config at $path must be a JSON object"
+  printf '%s' "$existing" | jq -e 'if has("mcpServers") then (.mcpServers | type == "object") else true end' >/dev/null 2>&1 ||
+    die "mcpServers in $path must be a JSON object"
+  if printf '%s' "$existing" | jq -e 'has("mcpServers") and (.mcpServers | has("atlassian"))' >/dev/null 2>&1; then
+    if printf '%s' "$existing" | jq -e --argjson entry "$entry" '.mcpServers.atlassian == $entry' >/dev/null 2>&1; then
+      return 2
+    fi
+    [[ "$replace" == "yes" ]] || die "refusing to replace existing atlassian entry in $path; use --replace"
+  fi
+  printf '%s' "$existing" | jq --argjson entry "$entry" '.mcpServers = ((.mcpServers // {}) + {atlassian: $entry})'
+}
+
+# Builds the Cursor MCP server entry and merges it into the Cursor config. Command is the wrapper:
+# it already carries the non-secret runtime config and resolves credential env indirection at
+# runtime, so no resolved secret values are written into Cursor's JSON.
+configure_cursor() {
+  local command="$1"
+  local entry merged rc content
+  entry="$(jq -cn --arg command "$command" '{type: "stdio", command: $command, args: []}')" || return 1
+  merged="$(merge_mcp_json "$cursor_config" "$entry")" && rc=0 || rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    return 0
+  fi
+  [[ "$rc" -eq 0 ]] || return 1
+  content="$(mktemp)"
+  printf '%s\n' "$merged" >"$content"
+  write_file_atomically "$content" "$cursor_config" yes || return 1
+  rm -f "$content"
+}
+
 # Ensures the Claude Code CLI is present before it is used to register the atlassian MCP server.
 require_claude_cli() {
   command -v claude >/dev/null 2>&1 || die "claude CLI is required for --scope local/user; install it, use --scope project, or select --agents codex"
@@ -384,18 +434,22 @@ configure_claude_cli() {
     echo "warning: could not verify atlassian MCP registration via claude mcp get" >&2
 }
 
-# Resolves user, local, and project config targets for the selected coding agents.
+# Resolves user, local, and project config targets for the selected coding agents. Cursor uses the
+# same project/workspace file for both local and project scope.
 config_paths() {
   case "$scope" in
     user)
       codex_config="$HOME/.codex/config.toml"
+      cursor_config="$HOME/.cursor/mcp.json"
       ;;
     local)
       codex_config="$project_dir/.codex/config.toml"
+      cursor_config="$project_dir/.cursor/mcp.json"
       ;;
     project)
       codex_config="$project_dir/.codex/config.toml"
       claude_config="$project_dir/.mcp.json"
+      cursor_config="$project_dir/.cursor/mcp.json"
       ;;
     *) die "--scope must be local, project, or user" ;;
   esac
@@ -427,6 +481,9 @@ configure_agents() {
         configure_claude_cli "$command" || return 1
         ;;
     esac
+  fi
+  if [[ "$select_cursor" == "yes" ]]; then
+    configure_cursor "$command" || return 1
   fi
 }
 
@@ -508,6 +565,9 @@ fi
 normalize_agents "$agents"
 [[ "$enable_jira" == "yes" || "$enable_confluence" == "yes" || "$enable_bitbucket" == "yes" ]] || die "select at least one module with --enable-jira, --enable-confluence, or --enable-bitbucket"
 [[ "$atlassian_tls_verify" == "true" || "$atlassian_tls_verify" == "false" ]] || die "--atlassian-tls-verify must be true or false"
+if [[ "$select_cursor" == "yes" || "$select_kiro" == "yes" ]]; then
+  command -v jq >/dev/null 2>&1 || die "jq is required when cursor or kiro is selected; install jq or remove cursor/kiro from --agents"
+fi
 
 if [[ "$enable_jira" == "yes" ]]; then
   [[ -n "$jira_base_url" ]] || die "--jira-base-url is required with --enable-jira"

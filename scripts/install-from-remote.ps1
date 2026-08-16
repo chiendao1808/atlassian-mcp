@@ -435,6 +435,68 @@ function New-ClaudeConfig($Path, $Command) {
 "@
 }
 
+# Builds the Cursor MCP server entry. Command is the installed executable: the PowerShell
+# installer persists runtime config to Windows User environment, so no wrapper exists and no
+# resolved secret values are written into Cursor's JSON.
+function New-CursorServerEntry($Command) {
+    return [pscustomobject][ordered]@{
+        type    = 'stdio'
+        command = [string]$Command
+        args    = @()
+    }
+}
+
+# Merges the atlassian entry into a JSON-backed agent config (Cursor/Kiro), preserving unrelated
+# root properties and unrelated mcpServers entries. Returns the merged JSON string, or $null when
+# the existing entry is already identical (idempotent no-op). Throws on malformed input or an
+# unaccepted conflict so the caller's transaction can roll back.
+function Merge-McpJson($Path, $Entry) {
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        throw "refusing to replace directory config at $Path"
+    }
+    $doc = [pscustomobject]@{ }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $raw = Get-Content -LiteralPath $Path -Raw
+        if (-not [string]::IsNullOrWhiteSpace($raw)) {
+            try {
+                $parsed = ConvertFrom-Json $raw
+            } catch {
+                throw "existing config at $Path is not valid JSON"
+            }
+            if ($null -eq $parsed -or $parsed -isnot [pscustomobject]) {
+                throw "existing config at $Path must be a JSON object"
+            }
+            $doc = $parsed
+        }
+    }
+    $servers = $null
+    $hasServers = $null -ne $doc.PSObject.Properties['mcpServers']
+    if ($hasServers) {
+        $servers = $doc.PSObject.Properties['mcpServers'].Value
+        if ($null -eq $servers -or $servers -isnot [pscustomobject]) {
+            throw "mcpServers in $Path must be a JSON object"
+        }
+    }
+    if ($hasServers -and $null -ne $servers.PSObject.Properties['atlassian']) {
+        $existingJson = ConvertTo-Json $servers.PSObject.Properties['atlassian'].Value -Depth 100
+        $entryJson = ConvertTo-Json $Entry -Depth 100
+        if ($existingJson -eq $entryJson) {
+            return $null
+        }
+        if (-not $Replace) {
+            throw "refusing to replace existing atlassian entry in $Path; use -Replace"
+        }
+        $servers | Add-Member -NotePropertyName 'atlassian' -NotePropertyValue $Entry -Force
+        return (ConvertTo-Json $doc -Depth 100)
+    }
+    if (-not $hasServers) {
+        $doc | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([pscustomobject][ordered]@{ })
+        $servers = $doc.PSObject.Properties['mcpServers'].Value
+    }
+    $servers | Add-Member -NotePropertyName 'atlassian' -NotePropertyValue $Entry
+    return (ConvertTo-Json $doc -Depth 100)
+}
+
 # Ensures the Claude Code CLI is present before it is used to register the atlassian MCP server.
 function Require-ClaudeCli {
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
@@ -470,22 +532,26 @@ function Configure-ClaudeCli($Command) {
     }
 }
 
-# Resolves user, local, and project agent config paths for the selected scope.
+# Resolves user, local, and project agent config paths for the selected scope. Cursor uses the
+# same project/workspace file for both Local and Project scope.
 function Get-ConfigPaths {
     $homeDir = Get-HomeDir
     if ($Scope -eq 'User') {
         return [pscustomobject]@{
-            Codex = Join-Path $homeDir '.codex\config.toml'
+            Codex  = Join-Path $homeDir '.codex\config.toml'
+            Cursor = Join-Path $homeDir '.cursor\mcp.json'
         }
     }
     if ($Scope -eq 'Local') {
         return [pscustomobject]@{
-            Codex = Join-Path $ProjectDir '.codex\config.toml'
+            Codex  = Join-Path $ProjectDir '.codex\config.toml'
+            Cursor = Join-Path $ProjectDir '.cursor\mcp.json'
         }
     }
     return [pscustomobject]@{
-        Codex = Join-Path $ProjectDir '.codex\config.toml'
+        Codex  = Join-Path $ProjectDir '.codex\config.toml'
         Claude = Join-Path $ProjectDir '.mcp.json'
+        Cursor = Join-Path $ProjectDir '.cursor\mcp.json'
     }
 }
 
@@ -500,6 +566,12 @@ function Configure-Agents($Command, $EnvVars) {
             Write-FileAtomically (New-ClaudeConfig $paths.Claude $Command) $paths.Claude $true
         } else {
             Configure-ClaudeCli $Command
+        }
+    }
+    if ($Script:SelectCursor) {
+        $merged = Merge-McpJson $paths.Cursor (New-CursorServerEntry $Command)
+        if ($null -ne $merged) {
+            Write-FileAtomically $merged $paths.Cursor $true
         }
     }
 }

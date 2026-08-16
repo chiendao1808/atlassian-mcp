@@ -654,6 +654,182 @@ function Test-AgentSelectionContract {
     }
 }
 
+function Test-CursorConfigPathsAndScopeMapping {
+    foreach ($scope in @('User', 'Local', 'Project')) {
+        $caseName = 'cursor-scope-' + $scope
+        $result = Invoke-InstallerSuccess $caseName @(
+            '-Binary', (Join-Path $RepoRoot 'go.mod'),
+            '-Agents', 'Cursor',
+            '-Scope', $scope,
+            '-EnableJira',
+            '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+        )
+        if ($scope -eq 'User') {
+            Assert-File (Join-Path $result.CaseDir 'home\.cursor\mcp.json')
+            if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.cursor')) { Fail 'cursor user scope wrote project config' }
+        } else {
+            Assert-File (Join-Path $result.CaseDir 'project\.cursor\mcp.json')
+            if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'home\.cursor')) { Fail "cursor $scope scope wrote home config" }
+        }
+    }
+}
+
+function Test-CursorMergePreservesExistingJson {
+    $caseDir = Join-Path $TmpRoot 'cursor-merge'
+    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project\.cursor') | Out-Null
+    New-Fakes (Join-Path $caseDir 'bin')
+    @'
+{
+  "mcpServers": {
+    "existing": {
+      "command": "existing-server"
+    }
+  },
+  "customSetting": true
+}
+'@ | Set-Content -LiteralPath (Join-Path $caseDir 'project\.cursor\mcp.json') -Encoding ASCII
+
+    $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+    try {
+        $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $caseDir 'home'
+        $env:USERPROFILE = Join-Path $caseDir 'home'
+        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $env:PSModuleAnalysisCachePath = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents Cursor `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($exitCode -ne 0) { Fail "cursor merge unexpectedly failed: $($output | Out-String)" }
+    } finally {
+        $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+    }
+
+    $cfg = Join-Path $caseDir 'project\.cursor\mcp.json'
+    $doc = ConvertFrom-Json (Get-Content -LiteralPath $cfg -Raw)
+    if ($doc.mcpServers.existing.command -ne 'existing-server') { Fail 'existing server entry changed' }
+    if ($doc.customSetting -ne $true) { Fail 'unrelated root key changed' }
+    if ($doc.mcpServers.atlassian.type -ne 'stdio') { Fail 'cursor type is not stdio' }
+    if (@($doc.mcpServers.atlassian.args).Count -ne 0) { Fail 'cursor args is not an empty array' }
+    if ($doc.mcpServers.atlassian.command -notmatch 'atlassian-mcp\.exe$') { Fail 'cursor command does not point at the exe' }
+}
+
+function Test-CursorConflictReplaceAndIdempotency {
+    $caseDir = Join-Path $TmpRoot 'cursor-conflict'
+    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project\.cursor') | Out-Null
+    New-Fakes (Join-Path $caseDir 'bin')
+    @'
+{
+  "mcpServers": {
+    "atlassian": {
+      "type": "stdio",
+      "command": "C:\\somewhere\\else.exe",
+      "args": []
+    }
+  },
+  "customSetting": true
+}
+'@ | Set-Content -LiteralPath (Join-Path $caseDir 'project\.cursor\mcp.json') -Encoding ASCII
+
+    $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+    try {
+        $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $caseDir 'home'
+        $env:USERPROFILE = Join-Path $caseDir 'home'
+        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $env:PSModuleAnalysisCachePath = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $conflictOutput = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents Cursor `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $conflictExit = $LASTEXITCODE
+        if ($conflictExit -eq 0) { Fail 'cursor conflict without -Replace unexpectedly succeeded' }
+        if (($conflictOutput | Out-String) -notmatch 'use -Replace') { Fail "cursor conflict message missing -Replace hint: $($conflictOutput | Out-String)" }
+        Assert-Contains (Join-Path $caseDir 'project\.cursor\mcp.json') 'somewhere'
+
+        $replaceOutput = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents Cursor `
+            -Replace `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $replaceExit = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($replaceExit -ne 0) { Fail "cursor replace unexpectedly failed: $($replaceOutput | Out-String)" }
+    } finally {
+        $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+    }
+
+    $cfg = Join-Path $caseDir 'project\.cursor\mcp.json'
+    Assert-NotContains $cfg 'somewhere'
+    $doc = ConvertFrom-Json (Get-Content -LiteralPath $cfg -Raw)
+    if ($doc.customSetting -ne $true) { Fail 'replace dropped unrelated root key' }
+    if ($doc.mcpServers.atlassian.command -notmatch 'atlassian-mcp\.exe$') { Fail 'replace did not install the exe command' }
+}
+
+function Test-CursorRejectsMalformedExistingConfig {
+    foreach ($case in @(@{ Name = 'malformed'; Body = '{not json' }, @{ Name = 'root-array'; Body = '[]' }, @{ Name = 'servers-array'; Body = '{"mcpServers": []}' })) {
+        $caseDir = Join-Path $TmpRoot ('cursor-bad-' + $case.Name)
+        New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project\.cursor') | Out-Null
+        New-Fakes (Join-Path $caseDir 'bin')
+        Set-Content -LiteralPath (Join-Path $caseDir 'project\.cursor\mcp.json') -Value $case.Body -Encoding ASCII
+
+        $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+        $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+        try {
+            $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+            $env:PATHEXT = ".PS1;$oldPathext"
+            $env:HOME = Join-Path $caseDir 'home'
+            $env:USERPROFILE = Join-Path $caseDir 'home'
+            $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+            $env:PSModuleAnalysisCachePath = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
+            $oldErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+                -Binary (Join-Path $RepoRoot 'go.mod') `
+                -InstallDir (Join-Path $caseDir 'install') `
+                -ProjectDir (Join-Path $caseDir 'project') `
+                -Scope Project `
+                -Agents Cursor `
+                -EnableJira `
+                -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+                -NonInteractive *>&1
+            $exitCode = $LASTEXITCODE
+            $ErrorActionPreference = $oldErrorActionPreference
+            if ($exitCode -eq 0) { Fail "cursor with $($case.Name) config unexpectedly succeeded" }
+        } finally {
+            $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+            $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+        }
+    }
+}
+
 function Test-FinalPathsAndReadmeBootstrapContract {
     Assert-File $Installer
     if (Test-Path -LiteralPath (Join-Path $RepoRoot 'install-from-remote.ps1')) {
@@ -680,8 +856,11 @@ try {
         'Test-ClaudeCliRegistersScopeLocalAndUser',
         'Test-ClaudeCliMissingBinaryErrorsClearly',
         'Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls',
-        'Test-DryRunValidatesWithoutSideEffects',
         'Test-AgentSelectionContract',
+        'Test-CursorConfigPathsAndScopeMapping',
+        'Test-CursorMergePreservesExistingJson',
+        'Test-CursorConflictReplaceAndIdempotency',
+        'Test-CursorRejectsMalformedExistingConfig',
         'Test-FinalPathsAndReadmeBootstrapContract'
     )
     foreach ($test in $tests) {

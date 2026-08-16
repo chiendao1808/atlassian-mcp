@@ -108,6 +108,61 @@ prompt_agents() {
   exec 3>&-
 }
 
+# Per-agent selection flags set by normalize_agents; consumed by validation and configure_agents.
+select_claude="no"
+select_codex="no"
+select_cursor="no"
+select_kiro="no"
+
+# Normalizes the --agents expression into the four selection flags. Accepts canonical lowercase
+# names, comma-separated combinations (repeated names are deduplicated), and the standalone
+# aliases both (claude+codex), all (claude+codex+cursor+kiro), and none.
+normalize_agents() {
+  local raw="$1" name rest
+  local -a names=()
+  select_claude="no"
+  select_codex="no"
+  select_cursor="no"
+  select_kiro="no"
+  rest="$raw"
+  while [[ "$rest" == *,* ]]; do
+    names+=("${rest%%,*}")
+    rest="${rest#*,}"
+  done
+  names+=("$rest")
+  case "${names[0]}" in
+    both)
+      [[ "${#names[@]}" -eq 1 ]] || die "both cannot be combined with other agent names"
+      select_claude="yes"
+      select_codex="yes"
+      return 0
+      ;;
+    all)
+      [[ "${#names[@]}" -eq 1 ]] || die "all cannot be combined with other agent names"
+      select_claude="yes"
+      select_codex="yes"
+      select_cursor="yes"
+      select_kiro="yes"
+      return 0
+      ;;
+    none)
+      [[ "${#names[@]}" -eq 1 ]] || die "none cannot be combined with other agent names"
+      return 0
+      ;;
+  esac
+  for name in "${names[@]}"; do
+    case "$name" in
+      claude) select_claude="yes" ;;
+      codex) select_codex="yes" ;;
+      cursor) select_cursor="yes" ;;
+      kiro) select_kiro="yes" ;;
+      both|all|none) die "$name cannot be combined with other agent names" ;;
+      "") die "--agents must not contain empty names" ;;
+      *) die "--agents name '$name' must be one of: claude, codex, cursor, kiro (or the aliases both, all, none)" ;;
+    esac
+  done
+}
+
 # Records the current state of an agent config so later config failures can be rolled back.
 backup_config() {
   local path="$1"
@@ -356,27 +411,23 @@ configure_agents() {
   local codex_content
   local claude_content
   config_paths
-  case "$agents" in
-    codex|both)
-      codex_content="$(managed_codex_config "$codex_config" "$binary")" || return 1
-      write_file_atomically "$codex_content" "$codex_config" yes || return 1
-      rm -f "$codex_content"
-      ;;
-  esac
-  case "$agents" in
-    claude|both)
-      case "$scope" in
-        project)
-          claude_content="$(managed_claude_config "$claude_config" "$command")" || return 1
-          write_file_atomically "$claude_content" "$claude_config" yes || return 1
-          rm -f "$claude_content"
-          ;;
-        *)
-          configure_claude_cli "$command" || return 1
-          ;;
-      esac
-      ;;
-  esac
+  if [[ "$select_codex" == "yes" ]]; then
+    codex_content="$(managed_codex_config "$codex_config" "$binary")" || return 1
+    write_file_atomically "$codex_content" "$codex_config" yes || return 1
+    rm -f "$codex_content"
+  fi
+  if [[ "$select_claude" == "yes" ]]; then
+    case "$scope" in
+      project)
+        claude_content="$(managed_claude_config "$claude_config" "$command")" || return 1
+        write_file_atomically "$claude_content" "$claude_config" yes || return 1
+        rm -f "$claude_content"
+        ;;
+      *)
+        configure_claude_cli "$command" || return 1
+        ;;
+    esac
+  fi
 }
 
 release_tag=""
@@ -454,7 +505,7 @@ if [[ -z "$agents" ]]; then
   [[ "$non_interactive" != "yes" ]] || die "--agents is required with --non-interactive"
   prompt_agents
 fi
-[[ "$agents" == "claude" || "$agents" == "codex" || "$agents" == "both" || "$agents" == "none" ]] || die "--agents must be claude, codex, both, or none"
+normalize_agents "$agents"
 [[ "$enable_jira" == "yes" || "$enable_confluence" == "yes" || "$enable_bitbucket" == "yes" ]] || die "select at least one module with --enable-jira, --enable-confluence, or --enable-bitbucket"
 [[ "$atlassian_tls_verify" == "true" || "$atlassian_tls_verify" == "false" ]] || die "--atlassian-tls-verify must be true or false"
 
@@ -469,7 +520,7 @@ if [[ -n "$jira_username" ]]; then
   # Codex's config carries the resolved password directly (see codex_env_lines), unlike the wrapper
   # used for Claude/manual runs, which resolves --jira-password-env only at its own runtime -- so
   # Codex needs it available now regardless of --non-interactive.
-  [[ "$agents" != "codex" && "$agents" != "both" || -n "${!jira_password_env:-}" ]] || die "$jira_password_env is required to configure Codex when --jira-username is set"
+  [[ "$select_codex" != "yes" || -n "${!jira_password_env:-}" ]] || die "$jira_password_env is required to configure Codex when --jira-username is set"
 fi
 if [[ "$enable_confluence" == "yes" ]]; then
   [[ -n "$confluence_base_url" ]] || die "--confluence-base-url is required with --enable-confluence"
@@ -481,7 +532,7 @@ if [[ -n "$confluence_username" ]]; then
   [[ "$non_interactive" != "yes" || -n "${!confluence_password_env:-}" ]] || die "$confluence_password_env is required for non-interactive installs when --confluence-username is set"
   # Codex's config carries the resolved password directly (see codex_env_lines), unlike the wrapper
   # used for Claude/manual runs, which resolves --confluence-password-env only at its own runtime.
-  [[ "$agents" != "codex" && "$agents" != "both" || -n "${!confluence_password_env:-}" ]] || die "$confluence_password_env is required to configure Codex when --confluence-username is set"
+  [[ "$select_codex" != "yes" || -n "${!confluence_password_env:-}" ]] || die "$confluence_password_env is required to configure Codex when --confluence-username is set"
 fi
 if [[ "$enable_bitbucket" == "yes" ]]; then
   [[ -n "$bitbucket_base_url" ]] || die "--bitbucket-base-url is required with --enable-bitbucket"
@@ -489,7 +540,7 @@ if [[ "$enable_bitbucket" == "yes" ]]; then
   require_url "--bitbucket-base-url" "$bitbucket_base_url"
   validate_token_env_name "--bitbucket-token-env" "$bitbucket_token_env"
   [[ "$non_interactive" != "yes" || -n "${!bitbucket_token_env:-}" ]] || die "$bitbucket_token_env is required for non-interactive Bitbucket installs"
-  [[ "$agents" != "codex" && "$agents" != "both" || -n "${!bitbucket_token_env:-}" ]] || die "$bitbucket_token_env is required to configure Codex"
+  [[ "$select_codex" != "yes" || -n "${!bitbucket_token_env:-}" ]] || die "$bitbucket_token_env is required to configure Codex"
 fi
 
 if [[ "$dry_run" == "yes" ]]; then
@@ -553,7 +604,7 @@ wrapper="$install_dir/atlassian-mcp-run"
 atomic_copy "$built_binary" "$installed_binary"
 write_wrapper "$wrapper" "$installed_binary"
 
-if [[ "$agents" != "none" ]]; then
+if [[ "$select_claude" == "yes" || "$select_codex" == "yes" || "$select_cursor" == "yes" || "$select_kiro" == "yes" ]]; then
   if ! configure_agents "$wrapper" "$installed_binary"; then
     rollback_configs
     die "failed to configure selected agents"

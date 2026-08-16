@@ -549,6 +549,82 @@ test_dry_run_validates_without_side_effects() {
   [[ ! -e "$TMP_ROOT/dry-run/project/.codex/config.toml" ]] || fail "dry-run wrote codex config"
 }
 
+test_agent_selection_contract() {
+  local valid
+  for valid in cursor kiro cursor,kiro claude,cursor claude,codex,cursor,kiro all both none cursor,cursor; do
+    local dir="$TMP_ROOT/sel-valid-$valid"
+    mkdir -p "$dir/home" "$dir/install" "$dir/project"
+    make_fakes "$dir/bin"
+    FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+      bash "$INSTALLER" \
+        --binary "$REPO_ROOT/go.mod" \
+        --install-dir "$dir/install" \
+        --project-dir "$dir/project" \
+        --scope project \
+        --agents "$valid" \
+        --enable-jira \
+        --jira-base-url https://jira.internal.example.com/jira \
+        --non-interactive >/tmp/installer-sel-valid.out 2>&1 ||
+      fail "--agents $valid unexpectedly failed: $(cat /tmp/installer-sel-valid.out)"
+  done
+
+  # both remains Claude + Codex only and never selects Cursor or Kiro.
+  local both_dir="$TMP_ROOT/sel-valid-both"
+  assert_file "$both_dir/project/.codex/config.toml"
+  assert_file "$both_dir/project/.mcp.json"
+  [[ ! -e "$both_dir/project/.cursor" ]] || fail "both created Cursor config"
+  [[ ! -e "$both_dir/project/.kiro" ]] || fail "both created Kiro config"
+
+  # all selects Claude + Codex today; Cursor/Kiro config assertions are added with their adapters.
+  local all_dir="$TMP_ROOT/sel-valid-all"
+  assert_file "$all_dir/project/.codex/config.toml"
+  assert_file "$all_dir/project/.mcp.json"
+
+  # claude,cursor selects Claude but not Codex.
+  local mixed_dir="$TMP_ROOT/sel-valid-claude,cursor"
+  assert_file "$mixed_dir/project/.mcp.json"
+  [[ ! -e "$mixed_dir/project/.codex/config.toml" ]] || fail "claude,cursor created Codex config"
+
+  # none registers no agent config.
+  local none_dir="$TMP_ROOT/sel-valid-none"
+  [[ ! -e "$none_dir/project/.codex/config.toml" ]] || fail "none created Codex config"
+  [[ ! -e "$none_dir/project/.mcp.json" ]] || fail "none created Claude config"
+
+  local invalid
+  for invalid in invalid none,cursor all,cursor both,kiro cursor, ""; do
+    local dir="$TMP_ROOT/sel-invalid-${invalid:-empty}"
+    mkdir -p "$dir/home" "$dir/install" "$dir/project"
+    make_fakes "$dir/bin"
+    if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+      bash "$INSTALLER" \
+        --binary "$REPO_ROOT/go.mod" \
+        --install-dir "$dir/install" \
+        --project-dir "$dir/project" \
+        --scope project \
+        --agents "$invalid" \
+        --enable-jira \
+        --jira-base-url https://jira.internal.example.com/jira \
+        --non-interactive >/tmp/installer-sel-invalid.out 2>&1; then
+      fail "--agents '$invalid' unexpectedly succeeded"
+    fi
+    [[ ! -e "$dir/install/atlassian-mcp" ]] || fail "--agents '$invalid' installed before validation"
+    [[ ! -e "$dir/project/.codex/config.toml" ]] || fail "--agents '$invalid' wrote config before validation"
+  done
+  if FAKE_LOG="$TMP_ROOT/sel-msg/commands.log" HOME="$TMP_ROOT" PATH="/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$TMP_ROOT/sel-msg" \
+      --project-dir "$TMP_ROOT/sel-msg" \
+      --scope project \
+      --agents invalid \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-sel-msg.out 2>&1; then
+    fail "--agents invalid unexpectedly succeeded"
+  fi
+  assert_contains /tmp/installer-sel-msg.out "must be one of: claude, codex, cursor, kiro"
+}
+
 test_final_paths_and_readme_bootstrap_contract() {
   assert_file "$REPO_ROOT/scripts/install-from-remote.sh"
   [[ ! -e "$REPO_ROOT/install-from-remote.sh" ]] || fail "root bash installer should not exist"
@@ -574,6 +650,7 @@ for test_name in \
   test_claude_cli_missing_binary_errors_clearly \
   test_rerun_is_idempotent_and_config_failure_rolls_back \
   test_dry_run_validates_without_side_effects \
+  test_agent_selection_contract \
   test_final_paths_and_readme_bootstrap_contract
 do
   "$test_name"

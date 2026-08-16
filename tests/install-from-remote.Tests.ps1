@@ -589,6 +589,71 @@ function Test-DryRunValidatesWithoutSideEffects {
     }
 }
 
+function Test-AgentSelectionContract {
+    foreach ($valid in @('Cursor', 'Kiro', 'Cursor,Kiro', 'Claude,Cursor', 'Claude,Codex,Cursor,Kiro', 'All', 'Both', 'None', 'Cursor,Cursor', 'cursor,kiro')) {
+        $caseName = 'sel-valid-' + ($valid -replace ',', '_')
+        $result = Invoke-InstallerSuccess $caseName @(
+            '-Binary', (Join-Path $RepoRoot 'go.mod'),
+            '-Agents', $valid,
+            '-EnableJira',
+            '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+        )
+        if ($result.ExitCode -ne 0) {
+            Fail "-Agents '$valid' unexpectedly failed: $($result.Output)"
+        }
+    }
+
+    # Both remains Claude + Codex only and never selects Cursor or Kiro.
+    $bothDir = Join-Path $TmpRoot 'sel-valid-Both'
+    Assert-File (Join-Path $bothDir 'project\.codex\config.toml')
+    Assert-File (Join-Path $bothDir 'project\.mcp.json')
+    if (Test-Path -LiteralPath (Join-Path $bothDir 'project\.cursor')) { Fail 'Both created Cursor config' }
+    if (Test-Path -LiteralPath (Join-Path $bothDir 'project\.kiro')) { Fail 'Both created Kiro config' }
+
+    # All selects Claude + Codex today; Cursor/Kiro config assertions are added with their adapters.
+    $allDir = Join-Path $TmpRoot 'sel-valid-All'
+    Assert-File (Join-Path $allDir 'project\.codex\config.toml')
+    Assert-File (Join-Path $allDir 'project\.mcp.json')
+
+    # Claude,Cursor selects Claude but not Codex.
+    $mixedDir = Join-Path $TmpRoot 'sel-valid-Claude_Cursor'
+    Assert-File (Join-Path $mixedDir 'project\.mcp.json')
+    if (Test-Path -LiteralPath (Join-Path $mixedDir 'project\.codex\config.toml')) { Fail 'Claude,Cursor created Codex config' }
+
+    # None registers no agent config.
+    $noneDir = Join-Path $TmpRoot 'sel-valid-None'
+    if (Test-Path -LiteralPath (Join-Path $noneDir 'project\.codex\config.toml')) { Fail 'None created Codex config' }
+    if (Test-Path -LiteralPath (Join-Path $noneDir 'project\.mcp.json')) { Fail 'None created Claude config' }
+
+    foreach ($invalid in @('Invalid', 'None,Cursor', 'All,Cursor', 'Both,Kiro', 'Cursor,', '')) {
+        $caseName = 'sel-invalid-' + ($invalid -replace ',', '_')
+        $result = Invoke-InstallerCase $caseName @(
+            '-Binary', (Join-Path $RepoRoot 'go.mod'),
+            '-Agents', $invalid,
+            '-EnableJira',
+            '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+        )
+        if ($result.ExitCode -eq 0) {
+            Fail "-Agents '$invalid' unexpectedly succeeded"
+        }
+        if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'install\atlassian-mcp.exe')) {
+            Fail "-Agents '$invalid' installed before validation"
+        }
+        if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.codex\config.toml')) {
+            Fail "-Agents '$invalid' wrote config before validation"
+        }
+    }
+    $invalidResult = Invoke-InstallerCase 'sel-invalid-message' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'Invalid',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    )
+    if (($invalidResult.Output | Out-String) -notmatch 'must be one of: Claude, Codex, Cursor, Kiro') {
+        Fail "invalid -Agents error message missing contract: $($invalidResult.Output | Out-String)"
+    }
+}
+
 function Test-FinalPathsAndReadmeBootstrapContract {
     Assert-File $Installer
     if (Test-Path -LiteralPath (Join-Path $RepoRoot 'install-from-remote.ps1')) {
@@ -616,6 +681,7 @@ try {
         'Test-ClaudeCliMissingBinaryErrorsClearly',
         'Test-RerunIsIdempotentConfigFailureRollsBackAndRestrictsAcls',
         'Test-DryRunValidatesWithoutSideEffects',
+        'Test-AgentSelectionContract',
         'Test-FinalPathsAndReadmeBootstrapContract'
     )
     foreach ($test in $tests) {

@@ -2,7 +2,6 @@ param(
     [string]$ReleaseTag = '',
     [string]$Binary = '',
     [string]$InstallDir = (Join-Path $HOME '.local\bin'),
-    [ValidateSet('Claude', 'Codex', 'Both', 'None')]
     [string]$Agents = '',
     [ValidateSet('Local', 'Project', 'User')]
     [string]$Scope = 'User',
@@ -92,6 +91,55 @@ function Require-ServiceUrl($Name, $Value) {
 function Validate-TokenEnvName($Value) {
     if ($Value -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
         Die 'credential environment variable name must be valid'
+    }
+}
+
+# Per-agent selection flags set by Normalize-Agents; consumed by validation and Configure-Agents.
+$Script:SelectClaude = $false
+$Script:SelectCodex = $false
+$Script:SelectCursor = $false
+$Script:SelectKiro = $false
+
+# Normalizes the -Agents expression into the four selection flags. Accepts agent names in any
+# case, comma-separated combinations (repeated names are deduplicated), and the standalone
+# aliases Both (Claude+Codex), All (Claude+Codex+Cursor+Kiro), and None.
+function Normalize-Agents($Raw) {
+    $Script:SelectClaude = $false
+    $Script:SelectCodex = $false
+    $Script:SelectCursor = $false
+    $Script:SelectKiro = $false
+    $names = @([string]$Raw -split ',')
+    if ($names.Count -eq 0) {
+        Die '-Agents must name an agent (or Both, All, None)'
+    }
+    $first = $names[0].Trim().ToLowerInvariant()
+    if ($first -eq 'both') {
+        if ($names.Count -ne 1) { Die 'Both cannot be combined with other agent names' }
+        $Script:SelectClaude = $true
+        $Script:SelectCodex = $true
+        return
+    }
+    if ($first -eq 'all') {
+        if ($names.Count -ne 1) { Die 'All cannot be combined with other agent names' }
+        $Script:SelectClaude = $true
+        $Script:SelectCodex = $true
+        $Script:SelectCursor = $true
+        $Script:SelectKiro = $true
+        return
+    }
+    if ($first -eq 'none') {
+        if ($names.Count -ne 1) { Die 'None cannot be combined with other agent names' }
+        return
+    }
+    foreach ($name in $names) {
+        $normalized = $name.Trim().ToLowerInvariant()
+        if ($normalized -eq 'claude') { $Script:SelectClaude = $true }
+        elseif ($normalized -eq 'codex') { $Script:SelectCodex = $true }
+        elseif ($normalized -eq 'cursor') { $Script:SelectCursor = $true }
+        elseif ($normalized -eq 'kiro') { $Script:SelectKiro = $true }
+        elseif ($normalized -in @('both', 'all', 'none')) { Die "$name cannot be combined with other agent names" }
+        elseif ($normalized -eq '') { Die '-Agents must not contain empty names' }
+        else { Die "-Agents name '$name' must be one of: Claude, Codex, Cursor, Kiro (or the aliases Both, All, None)" }
     }
 }
 
@@ -444,10 +492,10 @@ function Get-ConfigPaths {
 # Configures selected agent files idempotently; caller rolls back any partial failure.
 function Configure-Agents($Command, $EnvVars) {
     $paths = Get-ConfigPaths
-    if ($Agents -eq 'Codex' -or $Agents -eq 'Both') {
+    if ($Script:SelectCodex) {
         Write-FileAtomically (New-CodexConfig $paths.Codex $Command $EnvVars) $paths.Codex $true
     }
-    if ($Agents -eq 'Claude' -or $Agents -eq 'Both') {
+    if ($Script:SelectClaude) {
         if ($Scope -eq 'Project') {
             Write-FileAtomically (New-ClaudeConfig $paths.Claude $Command) $paths.Claude $true
         } else {
@@ -535,11 +583,9 @@ try {
         if ($NonInteractive) {
             Die '-Agents is required with -NonInteractive'
         }
-        $Agents = Read-Host 'Select coding agents (Claude/Codex/Both/None)'
+        $Agents = Read-Host 'Select coding agents (claude,codex,cursor,kiro / both / all / none)'
     }
-    if ($Agents -notin @('Claude', 'Codex', 'Both', 'None')) {
-        Die '-Agents must be Claude, Codex, Both, or None'
-    }
+    Normalize-Agents $Agents
     Validate-TokenEnvName $JiraPasswordEnv
     Validate-TokenEnvName $ConfluencePasswordEnv
     Validate-TokenEnvName $BitbucketTokenEnv
@@ -603,7 +649,7 @@ try {
     $envVars = Get-ResolvedConfigEnv
     Set-PersistedConfigEnv $envVars
 
-    if ($Agents -ne 'None') {
+    if ($Script:SelectClaude -or $Script:SelectCodex -or $Script:SelectCursor -or $Script:SelectKiro) {
         try {
             Configure-Agents $installedBinary $envVars
             Cleanup-Backups

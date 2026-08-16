@@ -1047,6 +1047,154 @@ test_kiro_only_install_does_not_touch_other_agents() {
   assert_not_contains "$dir/commands.log" "claude mcp"
 }
 
+test_multi_agent_failure_rolls_back_prior_writes() {
+  require_jq "multi-agent rollback" || return 0
+  # Cursor config is a valid existing file; Kiro target is a directory. The installer must fail,
+  # restore the Cursor file byte-for-byte, and leave no partial Kiro config or temp/backup files.
+  local dir="$TMP_ROOT/rollback-cursor-kiro"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project/.cursor" "$dir/project/.kiro/settings/mcp.json"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  printf '{"mcpServers": {"keep": {"command": "keep-me"}}}\n' >"$dir/project/.cursor/mcp.json"
+  local original
+  original="$(cat "$dir/project/.cursor/mcp.json")"
+  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor,kiro \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-rollback-ck.out 2>&1; then
+    fail "cursor,kiro with directory Kiro target unexpectedly succeeded"
+  fi
+  [[ "$(cat "$dir/project/.cursor/mcp.json")" == "$original" ]] || fail "Cursor config was not restored to its original content"
+  local leftover
+  leftover="$(find "$dir/project" -name '*.bak.*' -o -name '*.tmp.*' 2>/dev/null)"
+  [[ -z "$leftover" ]] || fail "leftover backup/tmp files after rollback: $leftover"
+
+  # all: a Kiro failure must roll back the preceding Codex, Claude, and Cursor writes.
+  local all_dir="$TMP_ROOT/rollback-all"
+  mkdir -p "$all_dir/home" "$all_dir/install" "$all_dir/project/.cursor" "$all_dir/project/.kiro/settings/mcp.json"
+  make_fakes "$all_dir/bin"
+  cp "$JQ_BIN" "$all_dir/bin/jq"
+  chmod +x "$all_dir/bin/jq"
+  printf '{"mcpServers": {"keep": {"command": "keep-me"}}}\n' >"$all_dir/project/.cursor/mcp.json"
+  mkdir -p "$all_dir/project/.codex"
+  printf 'original codex config\n' >"$all_dir/project/.codex/config.toml"
+  if FAKE_LOG="$all_dir/commands.log" HOME="$all_dir/home" PATH="$all_dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$all_dir/install" \
+      --project-dir "$all_dir/project" \
+      --scope project \
+      --agents all \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-rollback-all.out 2>&1; then
+    fail "all with directory Kiro target unexpectedly succeeded"
+  fi
+  assert_contains "$all_dir/project/.codex/config.toml" "original codex config"
+  [[ ! -e "$all_dir/project/.mcp.json" ]] || fail "Claude config was not removed after rollback"
+  [[ "$(cat "$all_dir/project/.cursor/mcp.json")" == '{"mcpServers": {"keep": {"command": "keep-me"}}}' ]] || fail "Cursor config was not restored after all rollback"
+  leftover="$(find "$all_dir/project" -name '*.bak.*' -o -name '*.tmp.*' 2>/dev/null)"
+  [[ -z "$leftover" ]] || fail "leftover backup/tmp files after all rollback: $leftover"
+}
+
+test_dry_run_all_creates_no_cursor_or_kiro_config() {
+  require_jq "dry-run all" || return 0
+  local dir="$TMP_ROOT/dry-run-all"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents all \
+      --dry-run \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-dry-run-all.out 2>&1 ||
+    fail "dry-run all unexpectedly failed: $(cat /tmp/installer-dry-run-all.out)"
+  [[ ! -e "$dir/project/.cursor" ]] || fail "dry-run created Cursor config"
+  [[ ! -e "$dir/project/.kiro" ]] || fail "dry-run created Kiro config"
+  [[ ! -e "$dir/project/.codex" ]] || fail "dry-run created Codex config"
+  [[ ! -e "$dir/install/atlassian-mcp" ]] || fail "dry-run installed binary"
+}
+
+test_cursor_and_kiro_configs_contain_no_secrets() {
+  require_jq "secret leakage" || return 0
+  export BITBUCKET_SECRET_ENV='super-secret-token'
+  export JIRA_SECRET_ENV='super-secret-password'
+  export CONFLUENCE_SECRET_ENV='super-secret-confluence-password'
+  local dir="$TMP_ROOT/secrets-json"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents all \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --jira-username jira-svc \
+      --jira-password-env JIRA_SECRET_ENV \
+      --enable-confluence \
+      --confluence-base-url https://confluence.internal.example.com/confluence \
+      --confluence-username confluence-svc \
+      --confluence-password-env CONFLUENCE_SECRET_ENV \
+      --enable-bitbucket \
+      --bitbucket-base-url https://bitbucket.internal.example.com/bitbucket \
+      --bitbucket-project-key PRJ \
+      --bitbucket-token-env BITBUCKET_SECRET_ENV \
+      --non-interactive >/tmp/installer-secrets-json.out 2>&1 ||
+    fail "all-agents install with secrets unexpectedly failed: $(cat /tmp/installer-secrets-json.out)"
+  local cfg
+  for cfg in "$dir/project/.cursor/mcp.json" "$dir/project/.kiro/settings/mcp.json" "$dir/install/atlassian-mcp-run"; do
+    assert_not_contains "$cfg" "super-secret-token"
+    assert_not_contains "$cfg" "super-secret-password"
+    assert_not_contains "$cfg" "super-secret-confluence-password"
+  done
+  # Codex remains the deliberate exception that carries resolved secrets.
+  assert_contains "$dir/project/.codex/config.toml" 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
+}
+
+test_cursor_only_install_skips_claude_and_codex() {
+  require_jq "cursor isolation" || return 0
+  local dir="$TMP_ROOT/cursor-only"
+  mkdir -p "$dir/home" "$dir/install" "$dir/project"
+  make_fakes "$dir/bin"
+  cp "$JQ_BIN" "$dir/bin/jq"
+  chmod +x "$dir/bin/jq"
+  FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin" \
+    bash "$INSTALLER" \
+      --binary "$REPO_ROOT/go.mod" \
+      --install-dir "$dir/install" \
+      --project-dir "$dir/project" \
+      --scope project \
+      --agents cursor \
+      --enable-jira \
+      --jira-base-url https://jira.internal.example.com/jira \
+      --non-interactive >/tmp/installer-cursor-only.out 2>&1 ||
+    fail "cursor-only install unexpectedly failed: $(cat /tmp/installer-cursor-only.out)"
+  assert_file "$dir/project/.cursor/mcp.json"
+  [[ ! -e "$dir/project/.codex" ]] || fail "cursor-only install created Codex config"
+  [[ ! -e "$dir/project/.mcp.json" ]] || fail "cursor-only install created Claude config"
+  [[ ! -e "$dir/project/.kiro" ]] || fail "cursor-only install created Kiro config"
+  assert_not_contains "$dir/commands.log" "claude mcp"
+}
+
 test_jq_required_only_for_cursor_or_kiro() {
   # Missing jq with cursor selected fails with a clear error before any install side effect.
   local dir="$TMP_ROOT/jq-missing-cursor"
@@ -1121,6 +1269,10 @@ for test_name in \
   test_kiro_merge_preserves_existing_json \
   test_kiro_conflict_replace_and_idempotency \
   test_kiro_only_install_does_not_touch_other_agents \
+  test_multi_agent_failure_rolls_back_prior_writes \
+  test_dry_run_all_creates_no_cursor_or_kiro_config \
+  test_cursor_and_kiro_configs_contain_no_secrets \
+  test_cursor_only_install_skips_claude_and_codex \
   test_jq_required_only_for_cursor_or_kiro \
   test_final_paths_and_readme_bootstrap_contract
 do

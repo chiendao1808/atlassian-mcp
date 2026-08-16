@@ -984,6 +984,148 @@ function Test-KiroOnlyInstallDoesNotTouchOtherAgents {
     Assert-NotContains $result.Log 'claude mcp'
 }
 
+function Test-MultiAgentFailureRollsBackPriorWrites {
+    # Cursor config is a valid existing file; Kiro target is a directory. The installer must fail,
+    # restore the Cursor file, and leave no partial Kiro config or temp/backup files.
+    $caseDir = Join-Path $TmpRoot 'rollback-cursor-kiro'
+    New-Item -ItemType Directory -Force -Path (Join-Path $caseDir 'home'), (Join-Path $caseDir 'install'), (Join-Path $caseDir 'project\.cursor'), (Join-Path $caseDir 'project\.kiro\settings\mcp.json') | Out-Null
+    New-Fakes (Join-Path $caseDir 'bin')
+    $cursorCfg = Join-Path $caseDir 'project\.cursor\mcp.json'
+    Set-Content -LiteralPath $cursorCfg -Value '{"mcpServers": {"keep": {"command": "keep-me"}}}' -Encoding ASCII
+    $original = Get-Content -LiteralPath $cursorCfg -Raw
+
+    $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+    try {
+        $env:PATH = "$(Join-Path $caseDir 'bin');$oldPath"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $caseDir 'home'
+        $env:USERPROFILE = Join-Path $caseDir 'home'
+        $env:FAKE_LOG = Join-Path $caseDir 'commands.log'
+        $env:PSModuleAnalysisCachePath = Join-Path $caseDir 'ps-module-cache\ModuleAnalysisCache'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $caseDir 'install') `
+            -ProjectDir (Join-Path $caseDir 'project') `
+            -Scope Project `
+            -Agents 'Cursor,Kiro' `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($exitCode -eq 0) { Fail 'cursor,kiro with directory Kiro target unexpectedly succeeded' }
+    } finally {
+        $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+    }
+    if ((Get-Content -LiteralPath $cursorCfg -Raw) -ne $original) { Fail 'Cursor config was not restored to its original content' }
+    $leftover = Get-ChildItem -LiteralPath (Join-Path $caseDir 'project') -Recurse -File | Where-Object { $_.Name -match '\.(bak|tmp)\.\d+$' }
+    if ($leftover) { Fail "leftover backup/tmp files after rollback: $($leftover.FullName -join ', ')" }
+
+    # All: a Kiro failure must roll back the preceding Codex, Claude, and Cursor writes.
+    $allDir = Join-Path $TmpRoot 'rollback-all'
+    New-Item -ItemType Directory -Force -Path (Join-Path $allDir 'home'), (Join-Path $allDir 'install'), (Join-Path $allDir 'project\.cursor'), (Join-Path $allDir 'project\.codex'), (Join-Path $allDir 'project\.kiro\settings\mcp.json') | Out-Null
+    New-Fakes (Join-Path $allDir 'bin')
+    $allCursorCfg = Join-Path $allDir 'project\.cursor\mcp.json'
+    Set-Content -LiteralPath $allCursorCfg -Value '{"mcpServers": {"keep": {"command": "keep-me"}}}' -Encoding ASCII
+    $allOriginal = Get-Content -LiteralPath $allCursorCfg -Raw
+    Set-Content -LiteralPath (Join-Path $allDir 'project\.codex\config.toml') -Value 'original codex config' -Encoding ASCII
+
+    $oldPath = $env:PATH; $oldHome = $env:HOME; $oldUserProfile = $env:USERPROFILE; $oldFakeLog = $env:FAKE_LOG
+    $oldPathext = $env:PATHEXT; $oldModuleAnalysisCache = $env:PSModuleAnalysisCachePath
+    try {
+        $env:PATH = "$(Join-Path $allDir 'bin');$oldPath"
+        $env:PATHEXT = ".PS1;$oldPathext"
+        $env:HOME = Join-Path $allDir 'home'
+        $env:USERPROFILE = Join-Path $allDir 'home'
+        $env:FAKE_LOG = Join-Path $allDir 'commands.log'
+        $env:PSModuleAnalysisCachePath = Join-Path $allDir 'ps-module-cache\ModuleAnalysisCache'
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $output = & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $Installer `
+            -Binary (Join-Path $RepoRoot 'go.mod') `
+            -InstallDir (Join-Path $allDir 'install') `
+            -ProjectDir (Join-Path $allDir 'project') `
+            -Scope Project `
+            -Agents All `
+            -EnableJira `
+            -JiraBaseUrl 'https://jira.internal.example.com/jira' `
+            -NonInteractive *>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($exitCode -eq 0) { Fail 'all with directory Kiro target unexpectedly succeeded' }
+    } finally {
+        $env:PATH = $oldPath; $env:HOME = $oldHome; $env:USERPROFILE = $oldUserProfile; $env:FAKE_LOG = $oldFakeLog
+        $env:PATHEXT = $oldPathext; $env:PSModuleAnalysisCachePath = $oldModuleAnalysisCache
+    }
+    Assert-Contains (Join-Path $allDir 'project\.codex\config.toml') 'original codex config'
+    if (Test-Path -LiteralPath (Join-Path $allDir 'project\.mcp.json')) { Fail 'Claude config was not removed after rollback' }
+    if ((Get-Content -LiteralPath $allCursorCfg -Raw) -ne $allOriginal) { Fail 'Cursor config was not restored after all rollback' }
+    $leftover = Get-ChildItem -LiteralPath (Join-Path $allDir 'project') -Recurse -File | Where-Object { $_.Name -match '\.(bak|tmp|replace)\.\d+$' }
+    if ($leftover) { Fail "leftover backup/tmp files after all rollback: $($leftover.FullName -join ', ')" }
+}
+
+function Test-DryRunAllCreatesNoCursorOrKiroConfig {
+    $result = Invoke-InstallerSuccess 'dry-run-all' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'All',
+        '-DryRun',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    )
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.cursor')) { Fail 'dry-run created Cursor config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.kiro')) { Fail 'dry-run created Kiro config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.codex')) { Fail 'dry-run created Codex config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'install\atlassian-mcp.exe')) { Fail 'dry-run installed binary' }
+}
+
+function Test-CursorAndKiroConfigsContainNoSecrets {
+    $result = Invoke-InstallerSuccess 'secrets-json' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'All',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira',
+        '-JiraUsername', 'jira-svc',
+        '-JiraPasswordEnv', 'JIRA_SECRET_ENV',
+        '-EnableConfluence',
+        '-ConfluenceBaseUrl', 'https://confluence.internal.example.com/confluence',
+        '-ConfluenceUsername', 'confluence-svc',
+        '-ConfluencePasswordEnv', 'CONFLUENCE_SECRET_ENV',
+        '-EnableBitbucket',
+        '-BitbucketBaseUrl', 'https://bitbucket.internal.example.com/bitbucket',
+        '-BitbucketProjectKey', 'PRJ',
+        '-BitbucketTokenEnv', 'BITBUCKET_SECRET_ENV'
+    ) @{ BITBUCKET_SECRET_ENV = 'super-secret-token'; JIRA_SECRET_ENV = 'super-secret-password'; CONFLUENCE_SECRET_ENV = 'super-secret-confluence-password' }
+
+    foreach ($cfg in @(
+        (Join-Path $result.CaseDir 'project\.cursor\mcp.json'),
+        (Join-Path $result.CaseDir 'project\.kiro\settings\mcp.json')
+    )) {
+        Assert-NotContains $cfg 'super-secret-token'
+        Assert-NotContains $cfg 'super-secret-password'
+        Assert-NotContains $cfg 'super-secret-confluence-password'
+    }
+    # Codex remains the deliberate exception that carries resolved secrets.
+    Assert-Contains (Join-Path $result.CaseDir 'project\.codex\config.toml') 'BITBUCKET_BEARER_TOKEN = "super-secret-token"'
+}
+
+function Test-CursorOnlyInstallSkipsClaudeAndCodex {
+    $result = Invoke-InstallerSuccess 'cursor-only' @(
+        '-Binary', (Join-Path $RepoRoot 'go.mod'),
+        '-Agents', 'Cursor',
+        '-EnableJira',
+        '-JiraBaseUrl', 'https://jira.internal.example.com/jira'
+    )
+    Assert-File (Join-Path $result.CaseDir 'project\.cursor\mcp.json')
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.codex')) { Fail 'cursor-only install created Codex config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.mcp.json')) { Fail 'cursor-only install created Claude config' }
+    if (Test-Path -LiteralPath (Join-Path $result.CaseDir 'project\.kiro')) { Fail 'cursor-only install created Kiro config' }
+    Assert-NotContains $result.Log 'claude mcp'
+}
+
 function Test-FinalPathsAndReadmeBootstrapContract {
     Assert-File $Installer
     if (Test-Path -LiteralPath (Join-Path $RepoRoot 'install-from-remote.ps1')) {
@@ -1019,6 +1161,10 @@ try {
         'Test-KiroMergePreservesExistingJson',
         'Test-KiroConflictReplaceAndIdempotency',
         'Test-KiroOnlyInstallDoesNotTouchOtherAgents',
+        'Test-MultiAgentFailureRollsBackPriorWrites',
+        'Test-DryRunAllCreatesNoCursorOrKiroConfig',
+        'Test-CursorAndKiroConfigsContainNoSecrets',
+        'Test-CursorOnlyInstallSkipsClaudeAndCodex',
         'Test-FinalPathsAndReadmeBootstrapContract'
     )
     foreach ($test in $tests) {

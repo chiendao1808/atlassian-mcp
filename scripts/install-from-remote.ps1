@@ -454,10 +454,19 @@ function Configure-Agents($Command, $EnvVars) {
 }
 
 # Resolves the release asset suffix supported by this installer.
+# Deliberately avoids System.Runtime.InteropServices.RuntimeInformation: on some Windows
+# PowerShell 5.1 (Desktop/.NET Framework) hosts that type's IsOSPlatform() resolves but
+# OSArchitecture throws PropertyNotFoundStrict under Set-StrictMode -Version 2.0, because the
+# facade assembly backing the type can be partially implemented depending on installed .NET
+# Framework version/GAC state. System.Environment has existed unchanged since .NET Framework 4.0,
+# so it works identically on every PowerShell version this script supports.
 function Get-ReleasePlatform {
-    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows) -or
-        [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
-        Die ("unsupported platform: {0}/{1} (supported: Windows amd64)" -f [System.Runtime.InteropServices.RuntimeInformation]::OSDescription, [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)
+    # $IsWindows is a PowerShell Core (6+) automatic variable and does not exist in Windows
+    # PowerShell (5.1, Desktop edition); Desktop edition only ever runs on Windows, so its
+    # absence implies Windows rather than indicating an unknown platform.
+    $isWindowsHost = if (Test-Path Variable:\IsWindows) { $IsWindows } else { $true }
+    if (-not $isWindowsHost -or -not [Environment]::Is64BitOperatingSystem) {
+        Die ("unsupported platform: {0} (supported: Windows amd64)" -f [Environment]::OSVersion.VersionString)
     }
     return 'windows_amd64.exe'
 }

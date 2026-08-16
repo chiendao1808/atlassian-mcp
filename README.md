@@ -41,7 +41,9 @@ SHA-256 verification detects corrupted or changed files after selecting a releas
 
 ## Bash Install
 
-Install the latest stable release:
+Install the latest stable release. This is the standard, full-argument form — every
+supported flag is listed; `--release-tag`/`--binary` (mutually exclusive alternatives to
+downloading the latest release) are left out here and shown separately below:
 
 ```bash
 INSTALLER_REF='main'
@@ -73,7 +75,8 @@ curl -fsSL "$INSTALLER_URL" |
     --non-interactive
 ```
 
-Pin an exact release binary:
+Pin an exact release binary instead of the latest one — add `--release-tag` (a minimal
+example; combine with the full module/agent args from above as needed):
 
 ```bash
 curl -fsSL "$INSTALLER_URL" |
@@ -100,9 +103,43 @@ bash scripts/install-from-remote.sh \
 
 The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. Claude/manual runs use the wrapper so token/password indirection is resolved at runtime. Codex is registered directly to the binary with explicit env values in `config.toml` because Codex does not pass its ambient environment to spawned MCP stdio servers.
 
+### Bash Installer Arguments
+
+| Argument | Required | Sample value | Default | Description |
+| --- | --- | --- | --- | --- |
+| `--release-tag` | No | `v1.0.4` | latest stable release (resolved via the GitHub releases API) | Exact release tag to download and verify. Must look like `v1.2.3`. Ignored when `--binary` is set. |
+| `--binary` | No (alternative to `--release-tag`) | `/path/to/atlassian-mcp` | *(empty)* | Path to a prebuilt/offline binary to install directly, skipping the GitHub download and checksum verification. |
+| `--install-dir` | No | `/home/me/.local/bin` | `$HOME/.local/bin` | Directory the installed binary and the generated `atlassian-mcp-run` wrapper are written into. |
+| `--agents` | Yes, unless run interactively | `both` (`claude`\|`codex`\|`both`\|`none`) | prompted on a TTY; error with `--non-interactive` | Selects which coding agent to register. For `--scope local`/`user`, Claude is registered via the `claude` CLI (`claude mcp add`); the `claude` CLI must be on `PATH`. |
+| `--scope` | No | `user` (`local`\|`project`\|`user`) | `user` | Chooses where agent configs are registered. Codex always writes `config.toml` (user home or `--project-dir`). For Claude: `local`/`user` register via the `claude` CLI; `project` writes `--project-dir/.mcp.json`. |
+| `--project-dir` | No | `/home/me/projects/atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `--scope` is `local`/`project`. |
+| `--enable-jira` | No (flag; at least one of `--enable-jira`/`--enable-confluence`/`--enable-bitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper (and, for Codex, into `config.toml`). |
+| `--jira-base-url` | Yes, if `--enable-jira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
+| `--jira-ca-file` | No | `/etc/ssl/certs/jira-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Jira server's TLS certificate. |
+| `--jira-username` | No (requires `--enable-jira`) | `svc-atlassian-mcp` | *(empty)* | Jira username resolved into `JIRA_USERNAME`, letting `jira_authenticate` fall back to it and enabling automatic startup authentication when the password is also present. The variable named by `--jira-password-env` must already hold a value for `--non-interactive` installs or whenever `--agents` includes `codex`. Omit entirely to leave both features off. |
+| `--jira-password-env` | No | `JIRA_PASSWORD` | `JIRA_PASSWORD` | Name of the environment variable the wrapper reads the Jira password from at runtime when `--jira-username` is set; for Codex, the resolved value is written into `config.toml` instead. |
+| `--enable-confluence` | No (flag; at least one of `--enable-jira`/`--enable-confluence`/`--enable-bitbucket` is required) | — | disabled | Enables the Confluence module and writes `CONFLUENCE_BASE_URL`/`CONFLUENCE_CA_FILE` into the wrapper (and, for Codex, into `config.toml`). |
+| `--confluence-base-url` | Yes, if `--enable-confluence` | `https://confluence.internal.example.com/confluence` | *(empty)* | Base URL of the Confluence instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
+| `--confluence-ca-file` | No | `/etc/ssl/certs/confluence-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Confluence server's TLS certificate. |
+| `--confluence-username` | No (requires `--enable-confluence`) | `svc-atlassian-mcp` | *(empty)* | Confluence username resolved into `CONFLUENCE_USERNAME`, enabling `confluence_authenticate` fallback and automatic startup authentication when the password is also present. Same `--non-interactive`/`codex` password-presence rule as Jira applies. Omit entirely to leave both features off. |
+| `--confluence-password-env` | No | `CONFLUENCE_PASSWORD` | `CONFLUENCE_PASSWORD` | Name of the environment variable the wrapper reads the Confluence password from at runtime when `--confluence-username` is set; for Codex, the resolved value is written into `config.toml` instead. |
+| `--enable-bitbucket` | No (flag; at least one of `--enable-jira`/`--enable-confluence`/`--enable-bitbucket` is required) | — | disabled | Enables the Bitbucket module and writes its base URL/project key/token indirection into the wrapper (and, for Codex, the resolved values into `config.toml`). |
+| `--bitbucket-base-url` | Yes, if `--enable-bitbucket` | `https://bitbucket.internal.example.com` | *(empty)* | Base URL of the Bitbucket instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
+| `--bitbucket-project-key` | Yes, if `--enable-bitbucket` | `ABC` | *(empty)* | Bitbucket project key that scopes the repository/pull-request tools. |
+| `--bitbucket-user-slug` | No | `jane.doe` | *(empty)* | Bitbucket user slug used where tools need to identify the acting user. |
+| `--bitbucket-token-env` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the wrapper reads the Bitbucket bearer token from at runtime; for Codex, the resolved value is also written into `config.toml`. The named variable must already hold a value for `--non-interactive` installs or whenever `--agents` includes `codex`. |
+| `--bitbucket-ca-file` | No | `/etc/ssl/certs/bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
+| `--atlassian-tls-verify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper (and, for Codex, `config.toml`) enables TLS certificate verification for Jira/Confluence/Bitbucket requests. |
+| `--dry-run` | No (flag) | — | disabled | Validates all arguments and exits without downloading, installing, or writing any config. |
+| `--replace` | No (flag) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `--scope project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `--scope local`/`user`, which register through the `claude` CLI and are idempotent by design. |
+| `--non-interactive` | No (flag) | — | disabled (prompts for `--agents` if omitted) | Disables the interactive `--agents` prompt; missing required values become hard errors. |
+| `-h`, `--help` | No (flag) | — | disabled | Prints usage text and exits. |
+
 ## PowerShell Install
 
-Install the latest stable release:
+Install the latest stable release. This is the standard, full-argument form — every
+supported parameter is listed; `-ReleaseTag`/`-Binary` (mutually exclusive alternatives to
+downloading the latest release) are left out here and shown separately below:
 
 ```powershell
 $INSTALLER_REF = 'main'
@@ -136,7 +173,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerFile `
   -NonInteractive
 ```
 
-Pin an exact release binary:
+Pin an exact release binary instead of the latest one — add `-ReleaseTag` (a minimal
+example; combine with the full module/agent args from above as needed):
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerFile `
@@ -161,6 +199,41 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-from-rem
 ```
 
 Restart Claude Code, Codex, and open terminals after a Windows install so they pick up newly persisted User environment variables. Codex also needs restart because it reads `config.toml` at startup.
+
+### PowerShell Installer Arguments
+
+There is no wrapper script on Windows: the installer resolves all module config, plus the Bitbucket token and optional Jira/Confluence credentials, directly into a fixed set of Windows **User** environment variables (and, for Codex, into `config.toml`) at install time.
+
+| Argument | Required | Sample value | Default | Description |
+| --- | --- | --- | --- | --- |
+| `-ReleaseTag` | No | `v1.0.4` | latest stable release (resolved via the GitHub releases API) | Exact release tag to download and verify. Must look like `v1.2.3`. Ignored when `-Binary` is set. |
+| `-Binary` | No (alternative to `-ReleaseTag`) | `C:\path\to\atlassian-mcp.exe` | *(empty)* | Path to a prebuilt/offline binary to install directly, skipping the GitHub download and checksum verification. |
+| `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the binary (`atlassian-mcp.exe`) is installed into. Claude/Codex are registered to run this exe directly. |
+| `-Agents` | Yes, unless run interactively | `Both` (`Claude`\|`Codex`\|`Both`\|`None`) | prompted on a TTY; error with `-NonInteractive` | Selects which coding agent to register. For `-Scope Local`/`User`, Claude is registered via the `claude` CLI (`claude mcp add`); the `claude` CLI must be on `PATH`. |
+| `-Scope` | No | `User` (`Local`\|`Project`\|`User`) | `User` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `-ProjectDir`). For Claude: `Local`/`User` register via the `claude` CLI; `Project` writes `-ProjectDir\.mcp.json`. |
+| `-ProjectDir` | No | `C:\Users\me\projects\atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `-Scope` is `Local`/`Project`. |
+| `-EnableJira` | No (switch; at least one of `-EnableJira`/`-EnableConfluence`/`-EnableBitbucket` is required) | — | disabled | Enables the Jira module and persists `JIRA_BASE_URL`/`JIRA_CA_FILE` as User environment variables. |
+| `-JiraBaseUrl` | Yes, if `-EnableJira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
+| `-JiraCaFile` | No | `C:\certs\jira-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Jira server's TLS certificate. |
+| `-JiraUsername` | No (requires `-EnableJira`) | `svc-atlassian-mcp` | *(empty)* | Jira username resolved into `JIRA_USERNAME`, letting `jira_authenticate` fall back to it and enabling automatic startup authentication when the password is also present. The variable named by `-JiraPasswordEnv` must already hold a value at install time whenever `-JiraUsername` is set. Omit entirely to leave both features off. |
+| `-JiraPasswordEnv` | No | `JIRA_PASSWORD` | `JIRA_PASSWORD` | Name of the environment variable the installer reads the Jira password from at install time when `-JiraUsername` is set; the resolved value is persisted to the `JIRA_PASSWORD` User environment variable and, for Codex, written into `config.toml`. |
+| `-EnableConfluence` | No (switch; at least one of `-EnableJira`/`-EnableConfluence`/`-EnableBitbucket` is required) | — | disabled | Enables the Confluence module and persists `CONFLUENCE_BASE_URL`/`CONFLUENCE_CA_FILE` as User environment variables. |
+| `-ConfluenceBaseUrl` | Yes, if `-EnableConfluence` | `https://confluence.internal.example.com/confluence` | *(empty)* | Base URL of the Confluence instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
+| `-ConfluenceCaFile` | No | `C:\certs\confluence-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Confluence server's TLS certificate. |
+| `-ConfluenceUsername` | No (requires `-EnableConfluence`) | `svc-atlassian-mcp` | *(empty)* | Confluence username resolved into `CONFLUENCE_USERNAME`, enabling `confluence_authenticate` fallback and automatic startup authentication when the password is also present. The variable named by `-ConfluencePasswordEnv` must already hold a value at install time whenever `-ConfluenceUsername` is set. Omit entirely to leave both features off. |
+| `-ConfluencePasswordEnv` | No | `CONFLUENCE_PASSWORD` | `CONFLUENCE_PASSWORD` | Name of the environment variable the installer reads the Confluence password from at install time when `-ConfluenceUsername` is set; the resolved value is persisted to the `CONFLUENCE_PASSWORD` User environment variable and, for Codex, written into `config.toml`. |
+| `-EnableBitbucket` | No (switch; at least one of `-EnableJira`/`-EnableConfluence`/`-EnableBitbucket` is required) | — | disabled | Enables the Bitbucket module and persists its base URL/project key/resolved token as User environment variables. |
+| `-BitbucketBaseUrl` | Yes, if `-EnableBitbucket` | `https://bitbucket.internal.example.com` | *(empty)* | Base URL of the Bitbucket instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
+| `-BitbucketProjectKey` | Yes, if `-EnableBitbucket` | `ABC` | *(empty)* | Bitbucket project key that scopes the repository/pull-request tools. |
+| `-BitbucketUserSlug` | No | `jane.doe` | *(empty)* | Bitbucket user slug used where tools need to identify the acting user. |
+| `-BitbucketTokenEnv` | No | `BITBUCKET_BEARER_TOKEN` | `BITBUCKET_BEARER_TOKEN` | Name of the environment variable the installer reads the Bitbucket bearer token from at install time; the resolved value is persisted to the `BITBUCKET_BEARER_TOKEN` User environment variable and, for Codex, also written into `config.toml`. Must already hold a value whenever `-EnableBitbucket` is set. |
+| `-BitbucketCaFile` | No | `C:\certs\bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
+| `-AtlassianTlsVerify` | No | `false` (`true`\|`false`) | `false` | Persisted as the `ATLASSIAN_TLS_VERIFY` User environment variable, controlling TLS certificate verification for Jira/Confluence/Bitbucket requests. |
+| `-DryRun` | No (switch) | — | disabled | Validates all arguments and exits without downloading, installing, or writing any config. |
+| `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `-Scope Project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `-Scope Local`/`User`, which register through the `claude` CLI and are idempotent by design. |
+| `-NonInteractive` | No (switch) | — | disabled (prompts for `-Agents` if omitted) | Disables the interactive `-Agents` prompt; missing required values become hard errors. |
+
+Unlike Jira/Confluence username handling in the Bash installer, PowerShell requires the matching password/token environment variable to already hold a value at install time whenever the corresponding username/module switch is set — regardless of `-NonInteractive` or `-Agents`.
 
 ## Credentials And Module Config
 
@@ -251,6 +324,8 @@ Runtime uses MCP stdio. Protocol messages are written to `stdout`; logs and star
 - Kept explicit local/offline `-Binary` / `--binary` installation for development, air-gapped, and rollback cases.
 - Added binary-first installation guide updates and the tool catalog reference.
 - Restored the step-by-step credential environment variable setup guide (Bash and PowerShell) that was dropped during the binary-first README rewrite.
+- Restored the Bash and PowerShell installer argument reference tables, updated for the current binary-first script interface (`--release-tag`/`-ReleaseTag` replaces the removed source-build flags).
+- Expanded the "latest stable release" install examples to show every supported argument, using the installer's native inline invocation style (`bash -s -- \` / `powershell.exe -File ... \``) consistent with the rest of the guide.
 
 ### v1.0.4
 

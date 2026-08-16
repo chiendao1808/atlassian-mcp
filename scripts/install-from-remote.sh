@@ -6,6 +6,9 @@ BACKUP_PATHS=()
 BACKUP_FILES=()
 BACKUP_EXISTS=()
 download_dir=""
+# Set by download_release_binary() to the resolved GitHub release tag so the final success
+# message can report it; stays empty when --binary is used (no release tag is resolved).
+installed_release_tag=""
 
 # Prints a fatal user-facing validation or execution error and terminates the installer.
 die() {
@@ -521,6 +524,7 @@ download_release_binary() {
   local platform tag version asset checksum_asset base_url expected actual line
   platform="$(release_platform)"
   tag="$(resolve_release_tag)"
+  installed_release_tag="$tag"
   version="${tag#v}"
   asset="atlassian-mcp_${version}_${platform}"
   checksum_asset="atlassian-mcp_${version}_checksums.txt"
@@ -557,5 +561,9 @@ if [[ "$agents" != "none" ]]; then
   cleanup_backups
 fi
 
-echo "installed atlassian-mcp to $installed_binary"
+if [[ -n "$installed_release_tag" ]]; then
+  echo "installed atlassian-mcp ${installed_release_tag} to $installed_binary"
+else
+  echo "installed atlassian-mcp (local binary) to $installed_binary"
+fi
 cleanup_download

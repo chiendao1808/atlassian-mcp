@@ -39,7 +39,49 @@ The installer supports Windows amd64 and Linux amd64 raw executables. Debian pac
 
 SHA-256 verification detects corrupted or changed files after selecting a release asset. It does not prove publisher identity because the checksum manifest is downloaded from the same GitHub release.
 
+## Credentials And Module Config
+
+Installers never accept secret values directly as command-line arguments. They read secrets through env-var name indirection at install time:
+
+- `BITBUCKET_BEARER_TOKEN`, or the variable named by `--bitbucket-token-env` / `-BitbucketTokenEnv`.
+- `JIRA_PASSWORD`, or the variable named by `--jira-password-env` / `-JiraPasswordEnv` when a Jira username is configured.
+- `CONFLUENCE_PASSWORD`, or the variable named by `--confluence-password-env` / `-ConfluencePasswordEnv` when a Confluence username is configured.
+
+At least one module must be enabled with `--enable-jira`, `--enable-confluence`, or `--enable-bitbucket` (PowerShell: `-EnableJira`, `-EnableConfluence`, `-EnableBitbucket`). Jira and Confluence support explicit authenticate tools and environment fallback; Bitbucket reads its bearer token from runtime config.
+
+Skip the Jira or Confluence password line entirely if you do not want the matching `*_authenticate` tool to have a credential fallback or automatic startup authentication. Omit `--jira-username`/`-JiraUsername` or `--confluence-username`/`-ConfluenceUsername` to leave that feature off for that module.
+
+Do not put credentials in the raw installer URL or any `--*-base-url`/`-*BaseUrl` argument. Use the env-var-name-indirected variables, or a secrets manager, for private access and secrets. The steps to set those variables are shown per installer type just below, right before each install command.
+
 ## Bash Install
+
+### Set Required Environment Variables (Bash)
+
+Set the indirection variables once for your user account so they survive new shells/terminals, then export them into the current shell before running the installer:
+
+```bash
+# Persist for the user account: append to the shell profile loaded on login
+echo "export BITBUCKET_BEARER_TOKEN='<your-bitbucket-token>'" >> "$HOME/.bashrc"   # bash
+echo "export JIRA_PASSWORD='<your-jira-password>'" >> "$HOME/.bashrc"
+echo "export CONFLUENCE_PASSWORD='<your-confluence-password>'" >> "$HOME/.bashrc"
+# echo "export BITBUCKET_BEARER_TOKEN='<your-bitbucket-token>'" >> "$HOME/.profile"  # sh/other login shells
+# echo "export JIRA_PASSWORD='<your-jira-password>'" >> "$HOME/.profile"
+# echo "export CONFLUENCE_PASSWORD='<your-confluence-password>'" >> "$HOME/.profile"
+
+# Load them into the current shell (or open a new terminal)
+source "$HOME/.bashrc"
+
+# Confirm they are visible to the process the installer will run in
+for name in BITBUCKET_BEARER_TOKEN JIRA_PASSWORD CONFLUENCE_PASSWORD; do
+  if [ -n "${!name:-}" ]; then
+    printf '%s is set\n' "$name"
+  else
+    printf '%s is missing\n' "$name"
+  fi
+done
+```
+
+Use custom variable names instead of the defaults above by passing `--bitbucket-token-env`, `--jira-password-env`, and/or `--confluence-password-env` with the matching name to `install-from-remote.sh`.
 
 Install the latest stable release. This is the standard, full-argument form — every
 supported flag is listed; `--release-tag`/`--binary` (mutually exclusive alternatives to
@@ -101,7 +143,7 @@ bash scripts/install-from-remote.sh \
   --non-interactive
 ```
 
-The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. Claude/manual runs use the wrapper so token/password indirection is resolved at runtime. Codex is registered directly to the binary with explicit env values in `config.toml` because Codex does not pass its ambient environment to spawned MCP stdio servers.
+The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. Claude/manual runs use the wrapper so token/password indirection is resolved at runtime. Codex is registered directly to the binary with explicit env values in `config.toml` because Codex does not pass its ambient environment to spawned MCP stdio servers. The final success line reports the resolved release tag (e.g. `installed atlassian-mcp v1.0.4 to ...`), or `(local binary)` when `--binary` was used instead of a GitHub download.
 
 ### Bash Installer Arguments
 
@@ -136,6 +178,33 @@ The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. 
 | `-h`, `--help` | No (flag) | — | disabled | Prints usage text and exits. |
 
 ## PowerShell Install
+
+### Set Required Environment Variables (PowerShell)
+
+The installer resolves these indirection variables at install time and persists the resolved values as Windows **User** environment variables (and, for Codex, into `config.toml`), so set the indirection variables in the User store first and reload them into the current session:
+
+```powershell
+# Persist for the user account (Windows User environment store)
+[Environment]::SetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', '<your-bitbucket-token>', 'User')
+[Environment]::SetEnvironmentVariable('JIRA_PASSWORD', '<your-jira-password>', 'User')
+[Environment]::SetEnvironmentVariable('CONFLUENCE_PASSWORD', '<your-confluence-password>', 'User')
+
+# Load them into the current session (or open a new terminal)
+$env:BITBUCKET_BEARER_TOKEN = [Environment]::GetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', 'User')
+$env:JIRA_PASSWORD = [Environment]::GetEnvironmentVariable('JIRA_PASSWORD', 'User')
+$env:CONFLUENCE_PASSWORD = [Environment]::GetEnvironmentVariable('CONFLUENCE_PASSWORD', 'User')
+
+# Confirm they are visible to the process the installer will run in
+foreach ($name in 'BITBUCKET_BEARER_TOKEN', 'JIRA_PASSWORD', 'CONFLUENCE_PASSWORD') {
+    if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name))) {
+        "$name is missing"
+    } else {
+        "$name is set"
+    }
+}
+```
+
+Use custom variable names instead of the defaults above by passing `-BitbucketTokenEnv`, `-JiraPasswordEnv`, and/or `-ConfluencePasswordEnv` with the matching name to `install-from-remote.ps1`.
 
 Install the latest stable release. This is the standard, full-argument form — every
 supported parameter is listed; `-ReleaseTag`/`-Binary` (mutually exclusive alternatives to
@@ -198,7 +267,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-from-rem
   -NonInteractive
 ```
 
-Restart Claude Code, Codex, and open terminals after a Windows install so they pick up newly persisted User environment variables. Codex also needs restart because it reads `config.toml` at startup.
+Restart Claude Code, Codex, and open terminals after a Windows install so they pick up newly persisted User environment variables. Codex also needs restart because it reads `config.toml` at startup. The final success line reports the resolved release tag (e.g. `installed atlassian-mcp v1.0.4 to ...`), or `(local binary)` when `-Binary` was used instead of a GitHub download.
 
 ### PowerShell Installer Arguments
 
@@ -235,75 +304,6 @@ There is no wrapper script on Windows: the installer resolves all module config,
 
 Unlike Jira/Confluence username handling in the Bash installer, PowerShell requires the matching password/token environment variable to already hold a value at install time whenever the corresponding username/module switch is set — regardless of `-NonInteractive` or `-Agents`.
 
-## Credentials And Module Config
-
-Installers never accept secret values directly as command-line arguments. They read secrets through env-var name indirection at install time:
-
-- `BITBUCKET_BEARER_TOKEN`, or the variable named by `--bitbucket-token-env` / `-BitbucketTokenEnv`.
-- `JIRA_PASSWORD`, or the variable named by `--jira-password-env` / `-JiraPasswordEnv` when a Jira username is configured.
-- `CONFLUENCE_PASSWORD`, or the variable named by `--confluence-password-env` / `-ConfluencePasswordEnv` when a Confluence username is configured.
-
-At least one module must be enabled with `--enable-jira`, `--enable-confluence`, or `--enable-bitbucket` (PowerShell: `-EnableJira`, `-EnableConfluence`, `-EnableBitbucket`). Jira and Confluence support explicit authenticate tools and environment fallback; Bitbucket reads its bearer token from runtime config.
-
-Skip the Jira or Confluence password line entirely if you do not want the matching `*_authenticate` tool to have a credential fallback or automatic startup authentication. Omit `--jira-username`/`-JiraUsername` or `--confluence-username`/`-ConfluenceUsername` to leave that feature off for that module.
-
-### Set Required Environment Variables (Bash)
-
-Set the indirection variables once for your user account so they survive new shells/terminals, then export them into the current shell before running the installer:
-
-```bash
-# Persist for the user account: append to the shell profile loaded on login
-echo "export BITBUCKET_BEARER_TOKEN='<your-bitbucket-token>'" >> "$HOME/.bashrc"   # bash
-echo "export JIRA_PASSWORD='<your-jira-password>'" >> "$HOME/.bashrc"
-echo "export CONFLUENCE_PASSWORD='<your-confluence-password>'" >> "$HOME/.bashrc"
-# echo "export BITBUCKET_BEARER_TOKEN='<your-bitbucket-token>'" >> "$HOME/.profile"  # sh/other login shells
-# echo "export JIRA_PASSWORD='<your-jira-password>'" >> "$HOME/.profile"
-# echo "export CONFLUENCE_PASSWORD='<your-confluence-password>'" >> "$HOME/.profile"
-
-# Load them into the current shell (or open a new terminal)
-source "$HOME/.bashrc"
-
-# Confirm they are visible to the process the installer will run in
-for name in BITBUCKET_BEARER_TOKEN JIRA_PASSWORD CONFLUENCE_PASSWORD; do
-  if [ -n "${!name:-}" ]; then
-    printf '%s is set\n' "$name"
-  else
-    printf '%s is missing\n' "$name"
-  fi
-done
-```
-
-Use custom variable names instead of the defaults above by passing `--bitbucket-token-env`, `--jira-password-env`, and/or `--confluence-password-env` with the matching name to `install-from-remote.sh`.
-
-### Set Required Environment Variables (PowerShell)
-
-The installer resolves these indirection variables at install time and persists the resolved values as Windows **User** environment variables (and, for Codex, into `config.toml`), so set the indirection variables in the User store first and reload them into the current session:
-
-```powershell
-# Persist for the user account (Windows User environment store)
-[Environment]::SetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', '<your-bitbucket-token>', 'User')
-[Environment]::SetEnvironmentVariable('JIRA_PASSWORD', '<your-jira-password>', 'User')
-[Environment]::SetEnvironmentVariable('CONFLUENCE_PASSWORD', '<your-confluence-password>', 'User')
-
-# Load them into the current session (or open a new terminal)
-$env:BITBUCKET_BEARER_TOKEN = [Environment]::GetEnvironmentVariable('BITBUCKET_BEARER_TOKEN', 'User')
-$env:JIRA_PASSWORD = [Environment]::GetEnvironmentVariable('JIRA_PASSWORD', 'User')
-$env:CONFLUENCE_PASSWORD = [Environment]::GetEnvironmentVariable('CONFLUENCE_PASSWORD', 'User')
-
-# Confirm they are visible to the process the installer will run in
-foreach ($name in 'BITBUCKET_BEARER_TOKEN', 'JIRA_PASSWORD', 'CONFLUENCE_PASSWORD') {
-    if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name))) {
-        "$name is missing"
-    } else {
-        "$name is set"
-    }
-}
-```
-
-Use custom variable names instead of the defaults above by passing `-BitbucketTokenEnv`, `-JiraPasswordEnv`, and/or `-ConfluencePasswordEnv` with the matching name to `install-from-remote.ps1`.
-
-Do not put credentials in the raw installer URL or any `--*-base-url` argument. Use these env-var-name-indirected variables, or a secrets manager, for private access and secrets.
-
 ## Build And Local Verification
 
 For source development:
@@ -326,6 +326,8 @@ Runtime uses MCP stdio. Protocol messages are written to `stdout`; logs and star
 - Restored the step-by-step credential environment variable setup guide (Bash and PowerShell) that was dropped during the binary-first README rewrite.
 - Restored the Bash and PowerShell installer argument reference tables, updated for the current binary-first script interface (`--release-tag`/`-ReleaseTag` replaces the removed source-build flags).
 - Expanded the "latest stable release" install examples to show every supported argument, using the installer's native inline invocation style (`bash -s -- \` / `powershell.exe -File ... \``) consistent with the rest of the guide.
+- Reordered the guide so each installer's credential environment variable setup steps appear immediately before that installer's install commands, instead of after both.
+- Both installers now report the resolved release tag (or `(local binary)` when `--binary`/`-Binary` was used) in their final success message.
 
 ### v1.0.4
 

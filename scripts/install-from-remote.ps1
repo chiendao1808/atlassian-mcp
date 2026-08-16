@@ -38,6 +38,9 @@ $ManagedConfluenceEnvKeys = @('CONFLUENCE_BASE_URL', 'CONFLUENCE_CA_FILE', 'CONF
 $Script:Backups = @()
 $Script:DownloadDir = ''
 $Script:InstallSucceeded = $false
+# Set by Download-ReleaseBinary to the resolved GitHub release tag so the final success message
+# can report it; stays empty when -Binary is used (no release tag is resolved).
+$Script:InstalledReleaseTag = ''
 $ReleaseDownloadTimeoutSec = 120
 
 # Emits a validation or execution failure with the stable installer name for callers and tests.
@@ -488,6 +491,7 @@ function Resolve-ReleaseTag {
 function Download-ReleaseBinary {
     $platform = Get-ReleasePlatform
     $tag = Resolve-ReleaseTag
+    $Script:InstalledReleaseTag = $tag
     $version = $tag.TrimStart('v')
     $asset = "atlassian-mcp_${version}_${platform}"
     $checksumAsset = "atlassian-mcp_${version}_checksums.txt"
@@ -609,7 +613,11 @@ try {
         }
     }
 
-    Write-Host "installed atlassian-mcp to $installedBinary"
+    if (-not [string]::IsNullOrEmpty($Script:InstalledReleaseTag)) {
+        Write-Host ("installed atlassian-mcp {0} to {1}" -f $Script:InstalledReleaseTag, $installedBinary)
+    } else {
+        Write-Host "installed atlassian-mcp (local binary) to $installedBinary"
+    }
     Write-Host 'restart Claude Code, Codex, or your terminal session to pick up the newly persisted environment variables'
     $Script:InstallSucceeded = $true
     Cleanup-Download

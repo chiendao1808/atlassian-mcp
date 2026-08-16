@@ -9,14 +9,25 @@ import (
 )
 
 type prListInput struct {
-	RepositorySlug string `json:"repositorySlug"`
-	State          string `json:"state,omitempty"`
-	Direction      string `json:"direction,omitempty"`
-	At             string `json:"at,omitempty"`
-	Order          string `json:"order,omitempty"`
-	Participant    string `json:"participant,omitempty"`
-	Start          *int   `json:"start,omitempty"`
-	Limit          *int   `json:"limit,omitempty"`
+	RepositorySlug string                `json:"repositorySlug"`
+	State          string                `json:"state,omitempty"`
+	Direction      string                `json:"direction,omitempty"`
+	At             string                `json:"at,omitempty"`
+	Order          string                `json:"order,omitempty"`
+	Participants   []prParticipantFilter `json:"participants,omitempty"`
+	WithAttributes *bool                 `json:"withAttributes,omitempty"`
+	WithProperties *bool                 `json:"withProperties,omitempty"`
+	Start          *int                  `json:"start,omitempty"`
+	Limit          *int                  `json:"limit,omitempty"`
+}
+
+// prParticipantFilter is one entry of the PR list participant filter set;
+// filters serialize consecutively as username.N / role.N / approved.N with N
+// starting at 1, no gaps, and a maximum of 10 (guide §3.14).
+type prParticipantFilter struct {
+	Username string `json:"username"`
+	Role     string `json:"role,omitempty"` // AUTHOR|REVIEWER|PARTICIPANT
+	Approved *bool  `json:"approved,omitempty"`
 }
 
 type prInput struct {
@@ -24,9 +35,19 @@ type prInput struct {
 	PullRequestID  int    `json:"pullRequestId"`
 }
 
-type prPagedInput struct {
+type prActivitiesInput struct {
 	RepositorySlug string `json:"repositorySlug"`
 	PullRequestID  int    `json:"pullRequestId"`
+	FromID         *int   `json:"fromId,omitempty"`
+	FromType       string `json:"fromType,omitempty"` // COMMENT|ACTIVITY; required when fromId is present
+	Start          *int   `json:"start,omitempty"`
+	Limit          *int   `json:"limit,omitempty"`
+}
+
+type prCommitsInput struct {
+	RepositorySlug string `json:"repositorySlug"`
+	PullRequestID  int    `json:"pullRequestId"`
+	WithCounts     *bool  `json:"withCounts,omitempty"`
 	Start          *int   `json:"start,omitempty"`
 	Limit          *int   `json:"limit,omitempty"`
 }
@@ -34,10 +55,10 @@ type prPagedInput struct {
 type prChangesInput struct {
 	RepositorySlug string `json:"repositorySlug"`
 	PullRequestID  int    `json:"pullRequestId"`
+	ChangeScope    string `json:"changeScope,omitempty"` // ALL|UNREVIEWED|RANGE
 	SinceID        string `json:"sinceId,omitempty"`
 	UntilID        string `json:"untilId,omitempty"`
 	WithComments   *bool  `json:"withComments,omitempty"`
-	Start          *int   `json:"start,omitempty"`
 	Limit          *int   `json:"limit,omitempty"`
 }
 
@@ -46,10 +67,12 @@ type prDiffInput struct {
 	PullRequestID  int    `json:"pullRequestId"`
 	Path           string `json:"path,omitempty"`
 	SrcPath        string `json:"srcPath,omitempty"`
+	DiffType       string `json:"diffType,omitempty"` // EFFECTIVE|RANGE|COMMIT
 	SinceID        string `json:"sinceId,omitempty"`
 	UntilID        string `json:"untilId,omitempty"`
 	ContextLines   *int   `json:"contextLines,omitempty"`
 	Whitespace     string `json:"whitespace,omitempty"`
+	WithComments   *bool  `json:"withComments,omitempty"`
 }
 
 type reviewerInput struct {
@@ -72,6 +95,9 @@ type createPRInput struct {
 type anchorInput struct {
 	Path     string `json:"path,omitempty"`
 	SrcPath  string `json:"srcPath,omitempty"`
+	DiffType string `json:"diffType,omitempty"`
+	FromHash string `json:"fromHash,omitempty"`
+	ToHash   string `json:"toHash,omitempty"`
 	Line     *int   `json:"line,omitempty"`
 	LineType string `json:"lineType,omitempty"`
 	FileType string `json:"fileType,omitempty"`
@@ -114,29 +140,80 @@ type updatePRInput struct {
 }
 
 func (s *Service) ListPullRequests(ctx context.Context, in prListInput) result.Envelope {
-	return s.getJSON(ctx, "bitbucket_list_pull_requests", in.RepositorySlug, "pull-requests", q(
-		"state", in.State, "direction", in.Direction, "at", in.At, "order", in.Order, "participant", in.Participant,
-	).page(in.Start, in.Limit), "pullRequests")
+	const tool = "bitbucket_list_pull_requests"
+	if in.State != "" && in.State != "OPEN" && in.State != "DECLINED" && in.State != "MERGED" && in.State != "ALL" {
+		return fail(tool, "state must be OPEN, DECLINED, MERGED, or ALL")
+	}
+	if in.Direction != "" && in.Direction != "INCOMING" && in.Direction != "OUTGOING" {
+		return fail(tool, "direction must be INCOMING or OUTGOING")
+	}
+	if in.Order != "" && in.Order != "OLDEST" && in.Order != "NEWEST" {
+		return fail(tool, "order must be OLDEST or NEWEST")
+	}
+	if len(in.Participants) > 10 {
+		return fail(tool, "at most 10 participant filters are supported")
+	}
+	qq := q("state", in.State, "direction", in.Direction, "at", in.At, "order", in.Order)
+	// Participant filters serialize consecutively as username.N / role.N /
+	// approved.N with N starting at 1 and no gaps (guide §3.14); a filter
+	// without a username would create a gap, so it is rejected up front.
+	for i, p := range in.Participants {
+		if strings.TrimSpace(p.Username) == "" {
+			return fail(tool, "participants[].username is required")
+		}
+		if p.Role != "" && p.Role != "AUTHOR" && p.Role != "REVIEWER" && p.Role != "PARTICIPANT" {
+			return fail(tool, "participants[].role must be AUTHOR, REVIEWER, or PARTICIPANT")
+		}
+		n := strconv.Itoa(i + 1)
+		qq = qq.add("username."+n, p.Username).add("role."+n, p.Role).bool("approved."+n, p.Approved)
+	}
+	return s.getJSON(ctx, tool, in.RepositorySlug, "pull-requests", qq.bool("withAttributes", in.WithAttributes).bool("withProperties", in.WithProperties).page(in.Start, in.Limit), "pullRequests")
 }
 
 func (s *Service) GetPullRequest(ctx context.Context, in prInput) result.Envelope {
 	return s.getPR(ctx, "bitbucket_get_pull_request", in.RepositorySlug, in.PullRequestID, "pullRequest")
 }
 
-func (s *Service) GetPullRequestActivities(ctx context.Context, in prPagedInput) result.Envelope {
-	return s.getJSON(ctx, "bitbucket_get_pull_request_activities", in.RepositorySlug, prPath(in.PullRequestID, "activities"), q().page(in.Start, in.Limit), "activities")
+func (s *Service) GetPullRequestActivities(ctx context.Context, in prActivitiesInput) result.Envelope {
+	const tool = "bitbucket_get_pull_request_activities"
+	if in.FromType != "" && in.FromType != "COMMENT" && in.FromType != "ACTIVITY" {
+		return fail(tool, "fromType must be COMMENT or ACTIVITY")
+	}
+	if in.FromID != nil && strings.TrimSpace(in.FromType) == "" {
+		return fail(tool, "fromType is required when fromId is present")
+	}
+	return s.getJSON(ctx, tool, in.RepositorySlug, prPath(in.PullRequestID, "activities"), q().int("fromId", in.FromID).add("fromType", in.FromType).page(in.Start, in.Limit), "activities")
 }
 
-func (s *Service) GetPullRequestCommits(ctx context.Context, in prPagedInput) result.Envelope {
-	return s.getJSON(ctx, "bitbucket_get_pull_request_commits", in.RepositorySlug, prPath(in.PullRequestID, "commits"), q().page(in.Start, in.Limit), "commits")
+func (s *Service) GetPullRequestCommits(ctx context.Context, in prCommitsInput) result.Envelope {
+	return s.getJSON(ctx, "bitbucket_get_pull_request_commits", in.RepositorySlug, prPath(in.PullRequestID, "commits"), q().bool("withCounts", in.WithCounts).page(in.Start, in.Limit), "commits")
 }
 
 func (s *Service) GetPullRequestChanges(ctx context.Context, in prChangesInput) result.Envelope {
-	return s.getJSON(ctx, "bitbucket_get_pull_request_changes", in.RepositorySlug, prPath(in.PullRequestID, "changes"), q("sinceId", in.SinceID, "untilId", in.UntilID).bool("withComments", in.WithComments).page(in.Start, in.Limit), "changes")
+	const tool = "bitbucket_get_pull_request_changes"
+	if in.ChangeScope != "" && in.ChangeScope != "ALL" && in.ChangeScope != "UNREVIEWED" && in.ChangeScope != "RANGE" {
+		return fail(tool, "changeScope must be ALL, UNREVIEWED, or RANGE")
+	}
+	if in.ChangeScope == "RANGE" && (strings.TrimSpace(in.SinceID) == "" || strings.TrimSpace(in.UntilID) == "") {
+		return fail(tool, "sinceId and untilId are required when changeScope is RANGE")
+	}
+	// start is intentionally not exposed: Bitbucket 5.10.2 ignores it on this
+	// endpoint (guide §3.18).
+	return s.getJSON(ctx, tool, in.RepositorySlug, prPath(in.PullRequestID, "changes"), q("changeScope", in.ChangeScope, "sinceId", in.SinceID, "untilId", in.UntilID).bool("withComments", in.WithComments).int("limit", in.Limit), "changes")
 }
 
 func (s *Service) GetPullRequestDiff(ctx context.Context, in prDiffInput) result.Envelope {
-	return s.diff(ctx, "bitbucket_get_pull_request_diff", in.RepositorySlug, prPath(in.PullRequestID, "diff"), in.Path, q("srcPath", in.SrcPath, "sinceId", in.SinceID, "untilId", in.UntilID, "whitespace", in.Whitespace).int("contextLines", in.ContextLines))
+	const tool = "bitbucket_get_pull_request_diff"
+	if in.DiffType != "" && in.DiffType != "EFFECTIVE" && in.DiffType != "RANGE" && in.DiffType != "COMMIT" {
+		return fail(tool, "diffType must be EFFECTIVE, RANGE, or COMMIT")
+	}
+	if in.DiffType == "RANGE" && (strings.TrimSpace(in.SinceID) == "" || strings.TrimSpace(in.UntilID) == "") {
+		return fail(tool, "sinceId and untilId are required when diffType is RANGE")
+	}
+	if in.DiffType == "COMMIT" && strings.TrimSpace(in.UntilID) == "" {
+		return fail(tool, "untilId is required when diffType is COMMIT")
+	}
+	return s.diff(ctx, tool, in.RepositorySlug, prPath(in.PullRequestID, "diff"), in.Path, q("srcPath", in.SrcPath, "diffType", in.DiffType, "sinceId", in.SinceID, "untilId", in.UntilID, "whitespace", in.Whitespace).int("contextLines", in.ContextLines).bool("withComments", in.WithComments))
 }
 
 func (s *Service) CheckPullRequestMergeability(ctx context.Context, in prInput) result.Envelope {
@@ -173,8 +250,24 @@ func (s *Service) AddPullRequestComment(ctx context.Context, in commentInput) re
 		body["parent"] = map[string]any{"id": *in.ParentID}
 	}
 	if in.Anchor != nil {
-		if in.Anchor.Path == "" || in.Anchor.Line == nil || in.Anchor.LineType == "" || in.Anchor.FileType == "" {
-			return fail("bitbucket_add_pull_request_comment", "inline anchor requires path, line, lineType, and fileType")
+		if strings.TrimSpace(in.Anchor.Path) == "" {
+			return fail("bitbucket_add_pull_request_comment", "anchor requires path")
+		}
+		if in.Anchor.Line != nil {
+			// Line anchors need both qualifiers fully populated.
+			if in.Anchor.LineType != "ADDED" && in.Anchor.LineType != "REMOVED" && in.Anchor.LineType != "CONTEXT" {
+				return fail("bitbucket_add_pull_request_comment", "line anchor requires lineType ADDED, REMOVED, or CONTEXT")
+			}
+			if in.Anchor.FileType != "FROM" && in.Anchor.FileType != "TO" {
+				return fail("bitbucket_add_pull_request_comment", "line anchor requires fileType FROM or TO")
+			}
+		} else if in.Anchor.LineType != "" || in.Anchor.FileType != "" {
+			// Partially populated anchors are never sent (guide §3.22):
+			// lineType/fileType only make sense together with line.
+			return fail("bitbucket_add_pull_request_comment", "lineType and fileType require line")
+		}
+		if (in.Anchor.FromHash != "" || in.Anchor.ToHash != "") && in.Anchor.DiffType == "" {
+			return fail("bitbucket_add_pull_request_comment", "diffType is required when fromHash or toHash is supplied")
 		}
 		body["anchor"] = in.Anchor
 	}
@@ -189,7 +282,11 @@ func (s *Service) SetPullRequestReviewStatus(ctx context.Context, in reviewStatu
 	if status != "APPROVED" && status != "NEEDS_WORK" && status != "UNAPPROVED" {
 		return fail("bitbucket_set_pull_request_review_status", "status must be APPROVED, NEEDS_WORK, or UNAPPROVED")
 	}
-	body := map[string]any{"status": status, "approved": status == "APPROVED"}
+	body := map[string]any{
+		"user":     map[string]any{"name": s.userSlug},
+		"status":   status,
+		"approved": status == "APPROVED",
+	}
 	return s.putJSON(ctx, "bitbucket_set_pull_request_review_status", in.RepositorySlug, prPath(in.PullRequestID, "participants", s.userSlug), nil, body, "participant")
 }
 

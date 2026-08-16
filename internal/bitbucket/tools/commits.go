@@ -25,6 +25,7 @@ type commitListInput struct {
 	Path           string `json:"path,omitempty"`
 	Merges         string `json:"merges,omitempty"`
 	FollowRenames  *bool  `json:"followRenames,omitempty"`
+	IgnoreMissing  *bool  `json:"ignoreMissing,omitempty"`
 	WithCounts     *bool  `json:"withCounts,omitempty"`
 	Start          *int   `json:"start,omitempty"`
 	Limit          *int   `json:"limit,omitempty"`
@@ -38,7 +39,8 @@ type commitInput struct {
 type commitPagedInput struct {
 	RepositorySlug string `json:"repositorySlug"`
 	CommitID       string `json:"commitId"`
-	Start          *int   `json:"start,omitempty"`
+	Since          string `json:"since,omitempty"`
+	WithComments   *bool  `json:"withComments,omitempty"`
 	Limit          *int   `json:"limit,omitempty"`
 }
 
@@ -47,8 +49,11 @@ type diffInput struct {
 	CommitID       string `json:"commitId,omitempty"`
 	Path           string `json:"path,omitempty"`
 	SrcPath        string `json:"srcPath,omitempty"`
+	Since          string `json:"since,omitempty"`
 	ContextLines   *int   `json:"contextLines,omitempty"`
 	Whitespace     string `json:"whitespace,omitempty"`
+	WithComments   *bool  `json:"withComments,omitempty"`
+	AutoSrcPath    *bool  `json:"autoSrcPath,omitempty"`
 }
 
 type compareInput struct {
@@ -68,6 +73,7 @@ type commitFileInput struct {
 	RepositorySlug string `json:"repositorySlug"`
 	Path           string `json:"path"`
 	Branch         string `json:"branch"`
+	Mode           string `json:"mode"` // exactly "create" or "update"
 	Content        string `json:"content,omitempty"`
 	ContentBase64  string `json:"contentBase64,omitempty"`
 	Message        string `json:"message"`
@@ -104,7 +110,7 @@ func (s *Service) ListCommits(ctx context.Context, in commitListInput) result.En
 	}
 	return s.getJSON(ctx, "bitbucket_list_commits", in.RepositorySlug, "commits", q(
 		"until", in.Until, "since", in.Since, "path", in.Path, "merges", in.Merges,
-	).bool("followRenames", in.FollowRenames).bool("withCounts", in.WithCounts).page(in.Start, in.Limit), "commits")
+	).bool("followRenames", in.FollowRenames).bool("ignoreMissing", in.IgnoreMissing).bool("withCounts", in.WithCounts).page(in.Start, in.Limit), "commits")
 }
 
 func (s *Service) GetCommit(ctx context.Context, in commitInput) result.Envelope {
@@ -118,35 +124,38 @@ func (s *Service) GetCommitChanges(ctx context.Context, in commitPagedInput) res
 	if strings.TrimSpace(in.CommitID) == "" {
 		return fail("bitbucket_get_commit_changes", "commitId is required")
 	}
-	return s.getJSONSegments(ctx, "bitbucket_get_commit_changes", in.RepositorySlug, []string{"commits", in.CommitID, "changes"}, q().page(in.Start, in.Limit), "changes")
+	return s.getJSONSegments(ctx, "bitbucket_get_commit_changes", in.RepositorySlug, []string{"commits", in.CommitID, "changes"}, q("since", in.Since).bool("withComments", in.WithComments).int("limit", in.Limit), "changes")
 }
 
 func (s *Service) GetCommitDiff(ctx context.Context, in diffInput) result.Envelope {
 	if strings.TrimSpace(in.CommitID) == "" {
 		return fail("bitbucket_get_commit_diff", "commitId is required")
 	}
-	return s.diffSegments(ctx, "bitbucket_get_commit_diff", in.RepositorySlug, []string{"commits", in.CommitID, "diff"}, in.Path, q("srcPath", in.SrcPath, "whitespace", in.Whitespace).int("contextLines", in.ContextLines))
+	return s.diffSegments(ctx, "bitbucket_get_commit_diff", in.RepositorySlug, []string{"commits", in.CommitID, "diff"}, in.Path, q("srcPath", in.SrcPath, "since", in.Since, "whitespace", in.Whitespace).int("contextLines", in.ContextLines).bool("withComments", in.WithComments).bool("autoSrcPath", in.AutoSrcPath))
 }
 
 func (s *Service) CompareCommits(ctx context.Context, in compareInput) result.Envelope {
-	if strings.TrimSpace(in.From) == "" || strings.TrimSpace(in.To) == "" {
-		return fail("bitbucket_compare_commits", "from and to are required")
+	qq, env := s.compareq("bitbucket_compare_commits", in)
+	if env != nil {
+		return *env
 	}
-	return s.getJSON(ctx, "bitbucket_compare_commits", in.RepositorySlug, "compare/commits", compareq(in).page(in.Start, in.Limit), "commits")
+	return s.getJSON(ctx, "bitbucket_compare_commits", in.RepositorySlug, "compare/commits", qq.page(in.Start, in.Limit), "commits")
 }
 
 func (s *Service) CompareChanges(ctx context.Context, in compareInput) result.Envelope {
-	if strings.TrimSpace(in.From) == "" || strings.TrimSpace(in.To) == "" {
-		return fail("bitbucket_compare_changes", "from and to are required")
+	qq, env := s.compareq("bitbucket_compare_changes", in)
+	if env != nil {
+		return *env
 	}
-	return s.getJSON(ctx, "bitbucket_compare_changes", in.RepositorySlug, "compare/changes", compareq(in).page(in.Start, in.Limit), "changes")
+	return s.getJSON(ctx, "bitbucket_compare_changes", in.RepositorySlug, "compare/changes", qq.page(in.Start, in.Limit), "changes")
 }
 
 func (s *Service) CompareDiff(ctx context.Context, in compareInput) result.Envelope {
-	if strings.TrimSpace(in.From) == "" || strings.TrimSpace(in.To) == "" {
-		return fail("bitbucket_compare_diff", "from and to are required")
+	qq, env := s.compareq("bitbucket_compare_diff", in)
+	if env != nil {
+		return *env
 	}
-	return s.diff(ctx, "bitbucket_compare_diff", in.RepositorySlug, "compare/diff", in.Path, compareq(in).add("srcPath", in.SrcPath).add("whitespace", in.Whitespace).int("contextLines", in.ContextLines))
+	return s.diff(ctx, "bitbucket_compare_diff", in.RepositorySlug, "compare/diff", in.Path, qq.add("srcPath", in.SrcPath).add("whitespace", in.Whitespace).int("contextLines", in.ContextLines))
 }
 
 func (s *Service) CommitFile(ctx context.Context, in commitFileInput) result.Envelope {
@@ -156,6 +165,23 @@ func (s *Service) CommitFile(ctx context.Context, in commitFileInput) result.Env
 	// Exactly one content source avoids silently committing a different payload than requested.
 	if (in.Content == "") == (in.ContentBase64 == "") {
 		return fail("bitbucket_commit_file", "exactly one of content or contentBase64 is required")
+	}
+	// Safety policy (guide §3.13, SPECS Task 8): the caller-declared mode keeps
+	// create and update semantics explicit. Update requires sourceCommitId so a
+	// concurrently changed file is never silently overwritten; create rejects
+	// it so no stale base can ride along. sourceBranch stays an optional
+	// pass-through in both modes (OQ-2 resolution): when branch does not yet
+	// exist the caller MUST supply it and the upstream error is surfaced
+	// otherwise.
+	mode := strings.ToLower(strings.TrimSpace(in.Mode))
+	if mode != "create" && mode != "update" {
+		return fail("bitbucket_commit_file", "mode must be create or update")
+	}
+	if mode == "update" && strings.TrimSpace(in.SourceCommitID) == "" {
+		return fail("bitbucket_commit_file", "sourceCommitId is required in update mode")
+	}
+	if mode == "create" && strings.TrimSpace(in.SourceCommitID) != "" {
+		return fail("bitbucket_commit_file", "sourceCommitId must be omitted in create mode")
 	}
 	content := []byte(in.Content)
 	if in.ContentBase64 != "" {
@@ -184,6 +210,22 @@ func (s *Service) CommitFile(ctx context.Context, in commitFileInput) result.Env
 	return result.OK("bitbucket", "bitbucket_commit_file", out)
 }
 
-func compareq(in compareInput) query {
-	return q("from", in.From, "to", in.To, "fromRepositorySlug", in.FromRepositorySlug)
+// compareq validates compare inputs and builds the shared compare query.
+// MCP input fromRepositorySlug serializes to fromRepo={projectKey}/{slug};
+// the raw input name is never emitted and no caller-supplied project, URL,
+// or slash-qualified value is accepted (guide §3.10).
+func (s *Service) compareq(tool string, in compareInput) (query, *result.Envelope) {
+	if strings.TrimSpace(in.From) == "" || strings.TrimSpace(in.To) == "" {
+		env := fail(tool, "from and to are required")
+		return nil, &env
+	}
+	if strings.Contains(in.FromRepositorySlug, "/") {
+		env := fail(tool, "fromRepositorySlug must be a bare repository slug in the configured project")
+		return nil, &env
+	}
+	qq := q("from", in.From, "to", in.To)
+	if strings.TrimSpace(in.FromRepositorySlug) != "" {
+		qq = qq.add("fromRepo", s.client.ProjectKey()+"/"+in.FromRepositorySlug)
+	}
+	return qq, nil
 }

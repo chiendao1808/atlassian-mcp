@@ -126,10 +126,10 @@ func (s *Service) registerPullRequestTools(server *mcp.Server, defs []*mcp.Tool)
 	mcp.AddTool(server, defs[14], func(ctx context.Context, req *mcp.CallToolRequest, input prInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.GetPullRequest(ctx, input), nil
 	})
-	mcp.AddTool(server, defs[15], func(ctx context.Context, req *mcp.CallToolRequest, input prPagedInput) (*mcp.CallToolResult, result.Envelope, error) {
+	mcp.AddTool(server, defs[15], func(ctx context.Context, req *mcp.CallToolRequest, input prActivitiesInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.GetPullRequestActivities(ctx, input), nil
 	})
-	mcp.AddTool(server, defs[16], func(ctx context.Context, req *mcp.CallToolRequest, input prPagedInput) (*mcp.CallToolResult, result.Envelope, error) {
+	mcp.AddTool(server, defs[16], func(ctx context.Context, req *mcp.CallToolRequest, input prCommitsInput) (*mcp.CallToolResult, result.Envelope, error) {
 		return nil, s.GetPullRequestCommits(ctx, input), nil
 	})
 	mcp.AddTool(server, defs[17], func(ctx context.Context, req *mcp.CallToolRequest, input prChangesInput) (*mcp.CallToolResult, result.Envelope, error) {

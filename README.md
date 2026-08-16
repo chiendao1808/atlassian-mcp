@@ -24,7 +24,7 @@ binary pin can still target the already published `v1.0.4` assets.
 
 ## Tools
 
-The current registered Jira, Confluence, and Bitbucket tools are listed in [docs/tools/catalog.md](docs/tools/catalog.md). Detailed module notes remain in [docs/tools/jira.md](docs/tools/jira.md) and [docs/tools/confluence.md](docs/tools/confluence.md).
+The current registered Jira, Confluence, and Bitbucket tools are listed in [docs/tools/catalog.md](docs/tools/catalog.md). Detailed module notes remain in [docs/tools/jira.md](docs/tools/jira.md), [docs/tools/confluence.md](docs/tools/confluence.md), and [docs/tools/bitbucket.md](docs/tools/bitbucket.md).
 
 ## Release Artifacts
 

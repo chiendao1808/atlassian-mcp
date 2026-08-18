@@ -137,7 +137,8 @@ make_fakes_without_jq() {
   local tool src
   for tool in bash sh cat cp mv rm mkdir chmod mktemp dirname basename grep awk sed sha256sum uname head tr cut sort env printf; do
     src="$(command -v "$tool" 2>/dev/null || true)"
-    if [[ -n "$src" && "$tool" != "jq" && ! -e "$dir/$tool" ]]; then
+    # command -v returns a bare name for shell builtins (e.g. printf); only real files can be linked.
+    if [[ -n "$src" && -f "$src" && "$tool" != "jq" && ! -e "$dir/$tool" ]]; then
       ln -sf "$src" "$dir/$tool"
     fi
   done
@@ -660,7 +661,7 @@ test_agent_selection_contract() {
   fi
 
   local invalid
-  for invalid in invalid none,cursor all,cursor both,kiro cursor, ""; do
+  for invalid in "invalid none" "cursor all" "cursor both" "kiro cursor" ""; do
     local dir="$TMP_ROOT/sel-invalid-${invalid:-empty}"
     mkdir -p "$dir/home" "$dir/install" "$dir/project"
     make_fakes "$dir/bin"
@@ -1196,11 +1197,27 @@ test_cursor_only_install_skips_claude_and_codex() {
 }
 
 test_jq_required_only_for_cursor_or_kiro() {
+  # When jq is already absent from the host PATH (JQ_BIN empty), the normal fake PATH
+  # ($dir/bin:/usr/bin:/bin) is naturally jq-less, so no restricted PATH is needed. The
+  # restricted-PATH construction (make_fakes_without_jq + PATH="$dir/bin") is only required on
+  # hosts where jq exists and must be hidden (e.g. CI Ubuntu). On Git Bash for Windows that
+  # restricted PATH cannot work because relocated bash/coreutils cannot load their DLLs, so it
+  # is used only when jq is actually present to hide.
+  local use_restricted="no"
+  [[ -n "$JQ_BIN" ]] && use_restricted="yes"
+
   # Missing jq with cursor selected fails with a clear error before any install side effect.
   local dir="$TMP_ROOT/jq-missing-cursor"
   mkdir -p "$dir/home" "$dir/install" "$dir/project"
-  make_fakes_without_jq "$dir/bin"
-  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$dir/bin" \
+  local missing_path
+  if [[ "$use_restricted" == "yes" ]]; then
+    make_fakes_without_jq "$dir/bin"
+    missing_path="$dir/bin"
+  else
+    make_fakes "$dir/bin"
+    missing_path="$dir/bin:/usr/bin:/bin"
+  fi
+  if FAKE_LOG="$dir/commands.log" HOME="$dir/home" PATH="$missing_path" \
     bash "$INSTALLER" \
       --binary "$REPO_ROOT/go.mod" \
       --install-dir "$dir/install" \
@@ -1218,8 +1235,15 @@ test_jq_required_only_for_cursor_or_kiro() {
   # Claude/Codex-only selections must not require jq even when it is absent.
   local ok_dir="$TMP_ROOT/jq-missing-claude-codex"
   mkdir -p "$ok_dir/home" "$ok_dir/install" "$ok_dir/project"
-  make_fakes_without_jq "$ok_dir/bin"
-  FAKE_LOG="$ok_dir/commands.log" HOME="$ok_dir/home" PATH="$ok_dir/bin" \
+  local ok_path
+  if [[ "$use_restricted" == "yes" ]]; then
+    make_fakes_without_jq "$ok_dir/bin"
+    ok_path="$ok_dir/bin"
+  else
+    make_fakes "$ok_dir/bin"
+    ok_path="$ok_dir/bin:/usr/bin:/bin"
+  fi
+  FAKE_LOG="$ok_dir/commands.log" HOME="$ok_dir/home" PATH="$ok_path" \
     bash "$INSTALLER" \
       --binary "$REPO_ROOT/go.mod" \
       --install-dir "$ok_dir/install" \

@@ -1,6 +1,6 @@
 # Atlassian MCP
 
-`atlassian-mcp` is a Go MCP stdio server for Jira, Confluence, and Bitbucket Server/Data Center APIs. The supported installer path is binary-first: installers download the published GitHub release executable, verify it with the release SHA-256 manifest, then register the binary with Claude Code and/or Codex.
+`atlassian-mcp` is a Go MCP stdio server for Jira, Confluence, and Bitbucket Server/Data Center APIs. The supported installer path is binary-first: installers download the published GitHub release executable, verify it with the release SHA-256 manifest, then register the binary with Claude Code, Codex, Cursor, and Kiro.
 
 ## Canonical Repository
 
@@ -21,6 +21,23 @@ The examples below use `main` only because the binary-first installer change is
 currently unreleased. `main` is a moving bootstrap ref: after the next release,
 replace it with that release's immutable tag or a full commit SHA. The release
 binary pin can still target the already published `v1.0.4` assets.
+
+## Agent Configuration Paths
+
+The installer writes each agent's config to its native location. Cursor and Kiro
+store their MCP servers in a JSON file that is merged rather than replaced, so
+existing unrelated MCP servers and top-level JSON keys survive every install or
+reinstall.
+
+| Installer scope | Claude Code | Codex | Cursor | Kiro |
+| --- | --- | --- | --- | --- |
+| `user` | registered via the `claude` CLI | `~/.codex/config.toml` | `~/.cursor/mcp.json` | `~/.kiro/settings/mcp.json` |
+| `project` | `<project>/.mcp.json` | `<project>/.codex/config.toml` | `<project>/.cursor/mcp.json` | `<project>/.kiro/settings/mcp.json` |
+| `local` | registered via the `claude` CLI | `<project>/.codex/config.toml` | `<project>/.cursor/mcp.json` (workspace alias) | `<project>/.kiro/settings/mcp.json` (workspace alias) |
+
+Cursor and Kiro keep the same project/workspace file for both `local` and
+`project` scope. References: [Cursor MCP](https://cursor.com/docs/mcp) and
+[Kiro MCP configuration](https://kiro.dev/docs/mcp/configuration/).
 
 ## Tools
 
@@ -143,7 +160,21 @@ bash scripts/install-from-remote.sh \
   --non-interactive
 ```
 
-The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. Claude/manual runs use the wrapper so token/password indirection is resolved at runtime. Codex is registered directly to the binary with explicit env values in `config.toml` because Codex does not pass its ambient environment to spawned MCP stdio servers. The final success line reports the resolved release tag (e.g. `installed atlassian-mcp v1.0.4 to ...`), or `(local binary)` when `--binary` was used instead of a GitHub download.
+The Bash installer writes the binary and an `atlassian-mcp-run` wrapper. Claude/manual runs use the wrapper so token/password indirection is resolved at runtime. Codex is registered directly to the binary with explicit env values in `config.toml` because Codex does not pass its ambient environment to spawned MCP stdio servers. Cursor and Kiro are registered through their JSON config files; those never contain resolved credentials — the wrapper resolves them at runtime. Configure Cursor and Kiro (`--agents cursor,kiro`) with the module flags from above; the same flags apply:
+
+```bash
+curl -fsSL "$INSTALLER_URL" |
+  bash -s -- \
+    --install-dir "$HOME/.local/bin" \
+    --agents cursor,kiro \
+    --scope project \
+    --project-dir "$(pwd)" \
+    --enable-jira \
+    --jira-base-url https://jira.internal.example.com/jira \
+    --non-interactive
+```
+
+`--agents all` registers every supported agent (`claude,codex,cursor,kiro`) in one run; `--agents both` remains Claude + Codex only. The final success line reports the resolved release tag (e.g. `installed atlassian-mcp v1.0.4 to ...`), or `(local binary)` when `--binary` was used instead of a GitHub download.
 
 ### Bash Installer Arguments
 
@@ -152,8 +183,8 @@ The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. 
 | `--release-tag` | No | `v1.0.4` | latest stable release (resolved via the GitHub releases API) | Exact release tag to download and verify. Must look like `v1.2.3`. Ignored when `--binary` is set. |
 | `--binary` | No (alternative to `--release-tag`) | `/path/to/atlassian-mcp` | *(empty)* | Path to a prebuilt/offline binary to install directly, skipping the GitHub download and checksum verification. |
 | `--install-dir` | No | `/home/me/.local/bin` | `$HOME/.local/bin` | Directory the installed binary and the generated `atlassian-mcp-run` wrapper are written into. |
-| `--agents` | Yes, unless run interactively | `both` (`claude`\|`codex`\|`both`\|`none`) | prompted on a TTY; error with `--non-interactive` | Selects which coding agent to register. For `--scope local`/`user`, Claude is registered via the `claude` CLI (`claude mcp add`); the `claude` CLI must be on `PATH`. |
-| `--scope` | No | `user` (`local`\|`project`\|`user`) | `user` | Chooses where agent configs are registered. Codex always writes `config.toml` (user home or `--project-dir`). For Claude: `local`/`user` register via the `claude` CLI; `project` writes `--project-dir/.mcp.json`. |
+| `--agents` | Yes, unless run interactively | `both` (`claude`\|`codex`\|`cursor`\|`kiro`, comma-separated) or `both`\|`all`\|`none` | prompted on a TTY; error with `--non-interactive` | Selects which coding agent to register. `both` means Claude + Codex only; `all` means Claude + Codex + Cursor + Kiro; explicit comma-separated lists deduplicate repeated names. For `--scope local`/`user`, Claude is registered via the `claude` CLI (`claude mcp add`); the `claude` CLI must be on `PATH`. Selecting `cursor` or `kiro` requires `jq` so the installer can merge the JSON config safely. |
+| `--scope` | No | `user` (`local`\|`project`\|`user`) | `user` | Chooses where agent configs are registered. Codex always writes `config.toml` (user home or `--project-dir`). For Claude: `local`/`user` register via the `claude` CLI; `project` writes `--project-dir/.mcp.json`. Cursor and Kiro write their JSON config in their config directory for every scope; `local` resolves to the project/workspace file (see the scope table above). |
 | `--project-dir` | No | `/home/me/projects/atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `--scope` is `local`/`project`. |
 | `--enable-jira` | No (flag; at least one of `--enable-jira`/`--enable-confluence`/`--enable-bitbucket` is required) | — | disabled | Enables the Jira module and writes `JIRA_BASE_URL`/`JIRA_CA_FILE` into the wrapper (and, for Codex, into `config.toml`). |
 | `--jira-base-url` | Yes, if `--enable-jira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
@@ -173,7 +204,7 @@ The Bash installer creates `atlassian-mcp` plus an `atlassian-mcp-run` wrapper. 
 | `--bitbucket-ca-file` | No | `/etc/ssl/certs/bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
 | `--atlassian-tls-verify` | No | `false` (`true`\|`false`) | `false` | Controls whether the wrapper (and, for Codex, `config.toml`) enables TLS certificate verification for Jira/Confluence/Bitbucket requests. |
 | `--dry-run` | No (flag) | — | disabled | Validates all arguments and exits without downloading, installing, or writing any config. |
-| `--replace` | No (flag) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `--scope project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `--scope local`/`user`, which register through the `claude` CLI and are idempotent by design. |
+| `--replace` | No (flag) | — | disabled (refuses to overwrite an unmanaged Claude config) | For `--scope project`, allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. For Cursor/Kiro JSON, replaces only the conflicting `mcpServers.atlassian` entry, preserving every unrelated root key and server entry. |
 | `--non-interactive` | No (flag) | — | disabled (prompts for `--agents` if omitted) | Disables the interactive `--agents` prompt; missing required values become hard errors. |
 | `-h`, `--help` | No (flag) | — | disabled | Prints usage text and exits. |
 
@@ -267,7 +298,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-from-rem
   -NonInteractive
 ```
 
-Restart Claude Code, Codex, and open terminals after a Windows install so they pick up newly persisted User environment variables. Codex also needs restart because it reads `config.toml` at startup. The final success line reports the resolved release tag (e.g. `installed atlassian-mcp v1.0.4 to ...`), or `(local binary)` when `-Binary` was used instead of a GitHub download.
+Restart Claude Code, Codex, Cursor, Kiro, and open terminals after a Windows install so they pick up newly persisted User environment variables. Codex also needs restart because it reads `config.toml` at startup. Cursor and Kiro read their merged JSON config, which never contains resolved credentials — runtime config comes from the persisted User environment. Configure Cursor and Kiro (`-Agents 'Cursor,Kiro'`) with the module flags from above; the same flags apply; `-Agents All` registers all four agents. The final success line reports the resolved release tag (e.g. `installed atlassian-mcp v1.0.4 to ...`), or `(local binary)` when `-Binary` was used instead of a GitHub download.
 
 ### PowerShell Installer Arguments
 
@@ -277,9 +308,9 @@ There is no wrapper script on Windows: the installer resolves all module config,
 | --- | --- | --- | --- | --- |
 | `-ReleaseTag` | No | `v1.0.4` | latest stable release (resolved via the GitHub releases API) | Exact release tag to download and verify. Must look like `v1.2.3`. Ignored when `-Binary` is set. |
 | `-Binary` | No (alternative to `-ReleaseTag`) | `C:\path\to\atlassian-mcp.exe` | *(empty)* | Path to a prebuilt/offline binary to install directly, skipping the GitHub download and checksum verification. |
-| `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the binary (`atlassian-mcp.exe`) is installed into. Claude/Codex are registered to run this exe directly. |
-| `-Agents` | Yes, unless run interactively | `Both` (`Claude`\|`Codex`\|`Both`\|`None`) | prompted on a TTY; error with `-NonInteractive` | Selects which coding agent to register. For `-Scope Local`/`User`, Claude is registered via the `claude` CLI (`claude mcp add`); the `claude` CLI must be on `PATH`. |
-| `-Scope` | No | `User` (`Local`\|`Project`\|`User`) | `User` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `-ProjectDir`). For Claude: `Local`/`User` register via the `claude` CLI; `Project` writes `-ProjectDir\.mcp.json`. |
+| `-InstallDir` | No | `C:\Users\me\.local\bin` | `Join-Path $HOME '.local\bin'` | Directory the binary (`atlassian-mcp.exe`) is installed into. Claude/Codex/Cursor/Kiro are registered to run this exe directly. |
+| `-Agents` | Yes, unless run interactively | `Both` (`Claude`\|`Codex`\|`Cursor`\|`Kiro`, comma-separated) or `Both`\|`All`\|`None` | prompted on a TTY; error with `-NonInteractive` | Selects which coding agent to register. `Both` means Claude + Codex only; `All` means Claude + Codex + Cursor + Kiro; explicit comma-separated lists deduplicate repeated names. For `-Scope Local`/`User`, Claude is registered via the `claude` CLI (`claude mcp add`); the `claude` CLI must be on `PATH`. |
+| `-Scope` | No | `User` (`Local`\|`Project`\|`User`) | `User` | Chooses where agent configs are registered. Codex always writes a TOML file (user home or `-ProjectDir`). For Claude: `Local`/`User` register via the `claude` CLI; `Project` writes `-ProjectDir\.mcp.json`. Cursor and Kiro write their JSON config in their config directory for every scope; `Local` resolves to the project/workspace file (see the scope table above). |
 | `-ProjectDir` | No | `C:\Users\me\projects\atlassian-mcp` | current working directory | Project directory used to resolve agent config paths when `-Scope` is `Local`/`Project`. |
 | `-EnableJira` | No (switch; at least one of `-EnableJira`/`-EnableConfluence`/`-EnableBitbucket` is required) | — | disabled | Enables the Jira module and persists `JIRA_BASE_URL`/`JIRA_CA_FILE` as User environment variables. |
 | `-JiraBaseUrl` | Yes, if `-EnableJira` | `https://jira.internal.example.com/jira` | *(empty)* | Base URL of the Jira instance. Must be a plain http(s) URL with no query, fragment, or embedded credentials. |
@@ -299,7 +330,7 @@ There is no wrapper script on Windows: the installer resolves all module config,
 | `-BitbucketCaFile` | No | `C:\certs\bitbucket-internal-ca.pem` | *(empty)* | Path to a custom CA bundle for validating the Bitbucket server's TLS certificate. |
 | `-AtlassianTlsVerify` | No | `false` (`true`\|`false`) | `false` | Persisted as the `ATLASSIAN_TLS_VERIFY` User environment variable, controlling TLS certificate verification for Jira/Confluence/Bitbucket requests. |
 | `-DryRun` | No (switch) | — | disabled | Validates all arguments and exits without downloading, installing, or writing any config. |
-| `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | Only applies to `-Scope Project`: allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. Has no effect on `-Scope Local`/`User`, which register through the `claude` CLI and are idempotent by design. |
+| `-Replace` | No (switch) | — | disabled (refuses to overwrite an unmanaged Claude config) | For `-Scope Project`, allows overwriting an existing `.mcp.json` that wasn't previously managed by this installer. For Cursor/Kiro JSON, replaces only the conflicting `mcpServers.atlassian` entry, preserving every unrelated root key and server entry. |
 | `-NonInteractive` | No (switch) | — | disabled (prompts for `-Agents` if omitted) | Disables the interactive `-Agents` prompt; missing required values become hard errors. |
 
 Unlike Jira/Confluence username handling in the Bash installer, PowerShell requires the matching password/token environment variable to already hold a value at install time whenever the corresponding username/module switch is set — regardless of `-NonInteractive` or `-Agents`.
@@ -328,6 +359,7 @@ Runtime uses MCP stdio. Protocol messages are written to `stdout`; logs and star
 - Expanded the "latest stable release" install examples to show every supported argument, using the installer's native inline invocation style (`bash -s -- \` / `powershell.exe -File ... \``) consistent with the rest of the guide.
 - Reordered the guide so each installer's credential environment variable setup steps appear immediately before that installer's install commands, instead of after both.
 - Both installers now report the resolved release tag (or `(local binary)` when `--binary`/`-Binary` was used) in their final success message.
+- Added Cursor and Kiro agent registration to both installers (`--agents cursor,kiro` / `-Agents 'Cursor,Kiro'`, plus the `all` alias), with JSON config merging that preserves unrelated servers and root keys, and added `docs/cursor.md` and `docs/kiro.md` configuration guides.
 
 ### v1.0.4
 

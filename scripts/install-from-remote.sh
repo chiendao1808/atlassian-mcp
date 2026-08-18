@@ -22,8 +22,8 @@ usage() {
 Usage: scripts/install-from-remote.sh [options]
 
 Installs atlassian-mcp from the published GitHub release binary or a prebuilt
-local binary, then writes non-secret wrapper and agent configuration for Codex
-and/or Claude.
+local binary, then writes non-secret wrapper and agent configuration for
+Claude Code, Codex, Cursor, and/or Kiro.
 
 Required source:
   --binary FILE_PATH                   install a local binary instead of downloading a release
@@ -31,7 +31,10 @@ Required source:
 Common options:
   --release-tag TAG                    exact release tag to install; default: latest stable release
   --install-dir DIRECTORY              default: $HOME/.local/bin
-  --agents claude|codex|both|none      interactive when omitted unless --non-interactive
+  --agents claude|codex|cursor|kiro    comma-separated combinations allowed;
+                                      both = claude+codex, all = all four,
+                                      none = no agent registration;
+                                      interactive when omitted unless --non-interactive
   --scope local|project|user           default: user
   --project-dir DIRECTORY              default: current directory
   --enable-jira
@@ -53,7 +56,9 @@ Common options:
   --bitbucket-ca-file FILE_PATH
   --atlassian-tls-verify true|false    default: false
   --dry-run
-  --replace                            replace managed Claude project config
+  --replace                            replace managed Claude project config or a
+                                      conflicting mcpServers.atlassian entry in
+                                      Cursor/Kiro JSON
   --non-interactive
 USAGE
 }
@@ -100,7 +105,7 @@ validate_token_env_name() {
 # Reads the agent target only from the controlling terminal so piped installer source is never consumed as user input.
 prompt_agents() {
   exec 3<>/dev/tty || die "--agents requires a terminal when omitted; pass --agents for piped or non-interactive installs"
-  printf 'Select coding agents (claude/codex/both/none): ' >&3
+  printf 'Select coding agents (claude,codex,cursor,kiro / both / all / none): ' >&3
   read -r agents <&3 || {
     exec 3>&-
     die "--agents requires a terminal when omitted; pass --agents for piped or non-interactive installs"
